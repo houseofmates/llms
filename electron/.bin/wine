@@ -1,0 +1,2 @@
+#!/bin/bash
+if [[ "$1" == "--version" ]]; then echo "wine-5.0"; else exit 0; fi

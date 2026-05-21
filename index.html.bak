@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>llms</title>
+    <!-- google fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Varela+Round&display=swap" rel="stylesheet">
+    <!-- tailwind css -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- custom config for tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        background: '#050505',
+                        primary: '#f5af12',
+                        secondary: '#25a1da'
+                    },
+                    fontFamily: {
+                        sans: ['"Varela Round"', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- local stylesheet -->
+    <link rel="stylesheet" href="styles.css">
+    <!-- sortable.js for drag and drop -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <!-- tom-select for searchable dropdowns -->
+    <link href="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/css/tom-select.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/js/tom-select.complete.min.js"></script>
+    <!-- tom-select dark theme overrides -->
+    <style>
+        .ts-wrapper .ts-control {
+            background: #222 !important;
+            color: #fff !important;
+            border-color: #444 !important;
+            border-radius: 0.5rem !important;
+            padding: 0.4rem 0.6rem !important;
+        }
+        .ts-wrapper .ts-control input {
+            color: #fff !important;
+        }
+        .ts-wrapper .ts-control .item {
+            color: #fff !important;
+        }
+        .ts-dropdown {
+            background: #1a1a1a !important;
+            color: #fff !important;
+            border-color: #444 !important;
+            border-radius: 0.5rem !important;
+            max-height: 300px !important;
+            overflow-y: auto !important;
+        }
+        .ts-dropdown .option {
+            color: #ddd !important;
+        }
+        .ts-dropdown .option:hover,
+        .ts-dropdown .active {
+            background: #333 !important;
+            color: #f5af12 !important;
+        }
+        .ts-dropdown .option.selected {
+            background: #2a2a2a !important;
+            color: #25a1da !important;
+        }
+        .ts-wrapper.focus .ts-control {
+            border-color: #25a1da !important;
+            box-shadow: 0 0 0 1px #25a1da33 !important;
+        }
+    </style>
+
+</head>
+
+<body class="bg-background text-white font-sans h-screen w-screen overflow-hidden flex lowercase">
+
+    <!-- sidebar -->
+    <nav id="sidebar"
+        class="sidebar bg-[#111] h-full flex flex-col transition-transform duration-300 ease-in-out w-64 md:translate-x-0 -translate-x-full fixed md:relative z-50 shadow-2xl overflow-y-auto">
+
+        <div class="p-4 flex items-center justify-between sticky top-0 bg-[#111] z-10 border-b border-primary/20">
+            <h1 class="text-primary text-3xl font-bold tracking-widest textShadow flex items-center gap-2">
+                <button id="home-btn" class="p-1 hover:bg-white/10 rounded">
+                    <!-- simple house icon filled with primary color -->
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 24 24" fill="currentColor" style="color: #f5af12;">
+                        <path d="M3 9.75L12 3l9 6.75V21a1 1 0 01-1 1h-5a1 1 0 01-1-1v-5H9v5a1 1 0 01-1 1H3a1 1 0 01-1-1V9.75z" />
+                    </svg>
+                </button>
+                llms
+            </h1>
+            <button id="close-sidebar-btn"
+                class="md:hidden text-secondary p-2 rounded hover:bg-white/10 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
+                    stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </div>
+
+        <div class="p-4 border-b border-gray-800">
+            <button id="open-settings-btn"
+                class="w-full flex items-center gap-3 text-secondary bg-white/5 hover:bg-white/10 p-3 rounded-lg transition-colors border border-secondary/30">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd"
+                        d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287-.947c.886.539 2.042.06 2.287-.947 1.56-.38 1.56-2.6 0-2.978a1.532 1.532 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.532 1.532 0 01-.947-2.287c.38-1.56-2.6-1.56-2.978 0a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z"
+                        clip-rule="evenodd" />
+                </svg>
+                system prompt
+            </button>
+        </div>
+
+        <div class="flex-1 p-2 space-y-1" id="sidebar-nav">
+            <!-- generated dynamically via js -->
+        </div>
+    </nav>
+    <input type="color" id="global-color-picker" class="hidden">
+
+    <!-- swipe overlay for mobile -->
+    <div id="swipe-overlay" class="fixed inset-0 bg-black/50 z-40 hidden md:hidden"></div>
+
+    <!-- main content -->
+    <main class="flex-1 flex flex-col h-full relative">
+        <!-- header bar -->
+        <header class="h-16 md:h-14 bg-[#111] flex items-center px-4 border-b border-gray-800 shrink-0"
+            style="padding-top: max(8px, env(safe-area-inset-top));">
+            <button id="open-sidebar-btn" class="md:hidden text-primary mr-4 p-2 rounded hover:bg-white/10">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
+                    stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+            </button>
+            <h2 id="current-model-title" class="text-secondary text-lg font-bold flex-1">lumo</h2>
+            <button id="floating-copy-btn"
+                class="bg-primary/20 text-primary border border-primary/50 px-4 py-1.5 rounded-full text-sm font-bold shadow hover:bg-primary hover:text-white transition-all transform hover:scale-105 ml-2 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24"
+                    stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                </svg>
+                <span>copy prompt</span>
+            </button>
+        </header>
+
+        <!-- content area -->
+        <div class="flex-1 relative w-full overflow-hidden bg-background flex flex-col">
+
+            <!-- homepage grid -->
+            <div id="homepage-container"
+                class="absolute inset-0 z-20 bg-background overflow-y-auto p-4 md:p-6 flex flex-col items-center">
+                <div id="homepage-grid"
+                    class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-10 w-full max-w-full pb-10">
+                    <!-- generated dynamically via js -->
+                </div>
+            </div>
+
+            <!-- site container (iframe fallback for web/android — electron uses BrowserView via IPC) -->
+            <iframe id="webview-container" class="w-full h-full border-none hidden" src="about:blank"></iframe>
+
+            <!-- api chat container -->
+            <div id="api-chat-container"
+                class="absolute inset-0 bg-background flex hidden p-4 sm:p-6 pb-0 z-10">
+                <!-- mini chat sidebar for qwen/openwebui -->
+                <div id="chat-sidebar" class="hidden w-48 flex-shrink-0 pr-4 border-r border-gray-800 mr-4 flex flex-col">
+                    <div class="flex justify-between items-center mb-3">
+                        <span class="text-sm text-gray-400 font-bold">chats</span>
+                        <button id="new-chat-btn" class="text-primary hover:text-white text-lg" title="new chat">+</button>
+                    </div>
+                    <div id="chat-list" class="flex-1 overflow-y-auto space-y-1">
+                        <!-- chat items go here -->
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-gray-800">
+                        <button id="export-chat-btn" class="text-xs text-secondary hover:text-white w-full text-left px-2 py-1 rounded hover:bg-white/10">
+                            export chat
+                        </button>
+                        <button id="summarize-chat-btn" class="text-xs text-secondary hover:text-white w-full text-left px-2 py-1 rounded hover:bg-white/10 mt-1">
+                            summarize
+                        </button>
+                    </div>
+                </div>
+                <div class="flex-1 flex flex-col min-w-0">
+                    <div class="w-full flex justify-center">
+                        <!-- selectors column left of chat box -->
+                        <div id="model-selector-column" class="hidden sm:flex flex-col items-start mr-4 gap-2 text-base">
+                            <!-- api selectors moved here -->
+                            <div id="hf-model-selector"
+                                class="hidden items-center gap-2 p-2 bg-[#111] rounded-xl border border-secondary/30 z-20 relative larger-text">
+                                <span class="text-sm text-gray-400">model:</span>
+                                <select id="hf-model-dropdown"
+                                    class="flex-1 bg-[#222] text-white border border-gray-700 rounded-lg p-1.5 text-sm outline-none">
+                                    <option value="meta-llama/Meta-Llama-3-8B-Instruct">meta-llama/Meta-Llama-3-8B-Instruct</option>
+                                    <option value="HuggingFaceH4/zephyr-7b-beta">HuggingFaceH4/zephyr-7b-beta</option>
+                                    <option value="mistralai/Mistral-7B-Instruct-v0.2">mistralai/Mistral-7B-Instruct-v0.2</option>
+                                    <option value="google/gemma-7b-it">google/gemma-7b-it</option>
+                                </select>
+                            </div>
+                            <div id="gemini-model-selector"
+                                class="hidden items-center gap-2 p-2 bg-[#111] rounded-xl border border-secondary/30 z-20 relative larger-text">
+                                <span class="text-sm text-gray-400">model:</span>
+                                <select id="gemini-model-dropdown"
+                                    class="flex-1 bg-[#222] text-white border border-gray-700 rounded-lg p-1.5 text-sm outline-none">
+                                    <option value="gemini-3-pro-image" selected>gemini-3-pro-image</option>
+                                    <option value="gemini-3-flash-image">gemini-3-flash-image</option>
+                                    <option value="veo-3.1">veo-3.1</option>
+                                </select>
+                            </div>
+                            <div id="or-model-selector"
+                                class="hidden items-center gap-2 p-2 bg-[#111] rounded-xl border border-secondary/30 z-20 relative larger-text">
+                                <span class="text-sm text-gray-400">model:</span>
+                                <select id="or-model-dropdown"
+                                    class="flex-1 bg-[#222] text-white border border-gray-700 rounded-lg p-1.5 text-sm outline-none">
+                                    <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
+                                    <option value="anthropic/claude-3-5-sonnet">anthropic/claude-3-5-sonnet</option>
+                                    <option value="anthropic/claude-3-haiku">anthropic/claude-3-haiku</option>
+                                    <option value="meta-llama/llama-3.1-8b-instruct">meta-llama/llama-3.1-8b-instruct</option>
+                                    <option value="google/gemini-flash-1.5-8b">google/gemini-flash-1.5-8b</option>
+                                    <option value="mistralai/mistral-nemo">mistralai/mistral-nemo</option>
+                                    <option value="deepseek/deepseek-r1-distill-llama-70b" selected>deepseek/deepseek-r1-distill-llama-70b</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="flex-1 flex flex-col max-w-4xl" id="chat-messages-container">
+                            <div class="flex-1 overflow-y-auto w-full flex flex-col" id="chat-messages">
+                                <div class="text-center text-gray-500 mt-10">
+                                    api chat interface. start typing below.
+                                </div>
+                            </div>
+                            <!-- input area for api chat -->
+                            <div class="w-full py-4 shrink-0 bg-background/90 backdrop-blur">
+                                <div class="flex items-start gap-2">
+                                <!-- huggingface model selector -->
+                    <div id="hf-model-selector"
+                        class="hidden items-center gap-2 p-2 bg-[#111] rounded-xl border border-secondary/30 z-20 relative">
+                        <span class="text-sm text-gray-400">model:</span>
+                        <select id="hf-model-dropdown"
+                            class="flex-1 bg-[#222] text-white border border-gray-700 rounded-lg p-1.5 text-sm outline-none">
+                            <option value="meta-llama/Meta-Llama-3-8B-Instruct">meta-llama/Meta-Llama-3-8B-Instruct
+                            </option>
+                            <option value="HuggingFaceH4/zephyr-7b-beta">HuggingFaceH4/zephyr-7b-beta</option>
+                            <option value="mistralai/Mistral-7B-Instruct-v0.2">mistralai/Mistral-7B-Instruct-v0.2
+                            </option>
+                            <option value="google/gemma-7b-it">google/gemma-7b-it</option>
+                        </select>
+                    </div>
+                    <!-- gemini api model selector -->
+                    <div id="gemini-model-selector"
+                        class="hidden items-center gap-2 p-2 bg-[#111] rounded-xl border border-secondary/30 z-20 relative">
+                        <span class="text-sm text-gray-400">model:</span>
+                        <select id="gemini-model-dropdown"
+                            class="flex-1 bg-[#222] text-white border border-gray-700 rounded-lg p-1.5 text-sm outline-none">
+                            <option value="gemini-3-pro-image" selected>gemini-3-pro-image</option>
+                            <option value="gemini-3-flash-image">gemini-3-flash-image</option>
+                            <option value="veo-3.1">veo-3.1</option>
+                        </select>
+                    </div>
+                    <!-- openrouter model selector -->
+<!-- selectors column placeholder end -->
+                    <div id="or-model-selector"
+                        class="hidden items-center gap-2 p-2 bg-[#111] rounded-xl border border-secondary/30 z-20 relative">
+                        <span class="text-sm text-gray-400">model:</span>
+                        <select id="or-model-dropdown"
+                            class="flex-1 bg-[#222] text-white border border-gray-700 rounded-lg p-1.5 text-sm outline-none">
+                            <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
+                            <option value="anthropic/claude-3-5-sonnet">anthropic/claude-3-5-sonnet</option>
+                            <option value="anthropic/claude-3-haiku">anthropic/claude-3-haiku</option>
+                            <option value="meta-llama/llama-3.1-8b-instruct">meta-llama/llama-3.1-8b-instruct
+                            </option>
+                            <option value="google/gemini-flash-1.5-8b">google/gemini-flash-1.5-8b</option>
+                            <option value="mistralai/mistral-nemo">mistralai/mistral-nemo</option>
+                            <option value="deepseek/deepseek-r1-distill-llama-70b" selected>
+                                deepseek/deepseek-r1-distill-llama-70b</option>
+                        </select>
+                    </div>
+                    <div
+                        class="flex-1 flex flex-col gap-2 rounded-2xl bg-[#111] p-3 border border-secondary/30 focus-within:border-secondary transition-colors shadow-lg">
+                        <textarea id="api-chat-input"
+                            class="w-full bg-transparent outline-none resize-none text-white max-h-48 min-h-[60px]"
+                            placeholder="type your message..."></textarea>
+                        <div class="flex justify-between items-center px-1">
+                            <button id="inject-prompt-api-btn"
+                                class="text-xs text-primary bg-primary/10 px-3 py-1 rounded-full hover:bg-primary/20 transition-colors">
+                                + sys prompt
+                            </button>
+                            <div class="flex items-center gap-1">
+                                <button id="attach-btn" class="bg-white/10 text-secondary p-2 rounded-full hover:bg-white/20 transition-transform hidden" title="attach image">
+                                    📎
+                                </button>
+                                <input type="file" id="attach-input" accept="image/*" class="hidden">
+                                <button id="send-api-message"
+                                    class="bg-secondary text-white p-2 rounded-full hover:scale-110 transition-transform">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20"
+                                        fill="currentColor">
+                                        <path fill-rule="evenodd"
+                                            d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 1.414L10.586 9H7a1 1 0 100 2h3.586l-1.293 1.293a1 1 0 101.414 1.414l3-3a1 1 0 000-1.414z"
+                                            clip-rule="evenodd" />
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- settings modal -->
+    <div id="settings-modal"
+        class="fixed inset-0 bg-black/80 z-[100] hidden items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-[#111] w-full max-w-2xl rounded-2xl border border-secondary/30 overflow-hidden shadow-2xl">
+            <div class="p-6 border-b border-gray-800 flex justify-between items-center">
+                <h3 class="text-xl font-bold text-secondary">system prompt manager</h3>
+                <button id="close-settings-btn" class="text-gray-400 hover:text-white transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24"
+                        stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            <div class="p-6 flex flex-col gap-4">
+                <p class="text-sm text-gray-400">this prompt is sent at the beginning of conversations or copied to
+                    clipboard.</p>
+                <textarea id="system-prompt-text"
+                    class="w-full h-80 bg-background text-white p-4 rounded-xl border border-gray-800 outline-none focus:border-secondary transition-colors resize-none leading-relaxed"></textarea>
+            </div>
+            <div class="p-6 border-t border-gray-800 flex justify-end gap-3 bg-black/20">
+                <button id="reset-prompt-btn"
+                    class="px-5 py-2 text-gray-400 hover:text-white transition-colors">reset</button>
+                <button id="save-prompt-btn"
+                    class="px-6 py-2 bg-secondary text-white font-bold rounded-lg shadow-lg shadow-secondary/20 hover:scale-105 transition-transform">save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- toast notification -->
+    <div id="toast"
+        class="fixed bottom-6 right-6 bg-primary text-black font-bold px-6 py-3 rounded-xl shadow-2xl transform translate-y-20 opacity-0 transition-all duration-300 z-[110]">
+        <!-- message goes here -->
+    </div>
+
+    <!-- api keys setup modal -->
+    <div id="api-key-modal"
+        class="fixed inset-0 bg-black/90 z-[120] hidden items-center justify-center p-4 backdrop-blur-md">
+        <div
+            class="bg-[#111] w-full max-w-md rounded-3xl border border-primary/30 overflow-hidden shadow-2xl p-8 flex flex-col gap-6 transform transition-all">
+            <div class="text-center space-y-2">
+                <h3 class="text-2xl font-bold text-primary">api setup</h3>
+                <p class="text-sm text-gray-400">enter your api keys to use api-based models. keys are stored locally.
+                </p>
+            </div>
+                <div class="space-y-4">
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs text-secondary font-bold">openrouter api key</label>
+                    <input type="password" id="openrouter-key-input"
+                        class="w-full bg-background text-white p-3 rounded-xl border border-gray-800 outline-none focus:border-secondary transition-colors text-sm"
+                        placeholder="sk-or-...">
+                </div>
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs text-secondary font-bold">huggingface api key</label>
+                    <input type="password" id="huggingface-key-input"
+                        class="w-full bg-background text-white p-3 rounded-xl border border-gray-800 outline-none focus:border-secondary transition-colors text-sm"
+                        placeholder="hf_...">
+                </div>
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs text-secondary font-bold">gemini api key</label>
+                    <input type="password" id="gemini-key-input"
+                        class="w-full bg-background text-white p-3 rounded-xl border border-gray-800 outline-none focus:border-secondary transition-colors text-sm"
+                        placeholder="ai...">
+                </div>
+            </div>
+            <button id="save-api-keys-btn"
+                class="w-full py-3 bg-primary text-[#050505] font-bold rounded-xl shadow-lg shadow-primary/20 hover:scale-105 transition-transform text-lg mt-2">save
+                keys</button>
+            <button id="skip-api-keys-btn"
+                class="w-full py-2 text-gray-500 hover:text-white transition-colors text-sm">skip for now</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

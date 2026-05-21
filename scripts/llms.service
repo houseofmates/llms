@@ -1,0 +1,21 @@
+# systemd unit file for llms web server
+
+[Unit]
+Description=LLMS Static Web Server
+After=network.target
+
+[Service]
+Type=simple
+# adjust WorkingDirectory to the repo root or wherever you deploy
+WorkingDirectory=/home/house/llms
+# ensure node is installed and in PATH; consider absolute path to node
+ExecStart=/usr/bin/env node server.js
+Restart=always
+RestartSec=5
+Environment=PORT=3000
+# optionally run as a less-privileged user
+#User=llms
+#Group=www-data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+{
+  "name": "llms",
+  "short_name": "llms",
+  "description": "local-first ai model aggregator with offline-friendly pwa shell",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/assets/icon-source.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/icon-source.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

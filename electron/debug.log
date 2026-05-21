@@ -1,0 +1,48 @@
+
+> llms@1.0.0 electron:start
+> npm run build && electron --inspect=5858 ./
+
+
+> llms@1.0.0 build
+> cd .. && npm run build && cd electron && tsc && electron-rebuild
+
+
+> llms@1.0.0 build
+> mkdir -p dist && cp index.html dist/ && cp script.js dist/ && cp styles.css dist/ && npx cap sync && cp -r dist/* electron/app/
+
+✔ Copying web assets from dist to android/app/src/main/assets/public in 4.18ms
+✔ Creating capacitor.config.json in android/app/src/main/assets in 536.78μs
+✔ copy android in 9.46ms
+✔ Updating Android plugins in 528.24μs
+✔ update android in 27.29ms
+✔ copy web in 1.22ms
+✔ update web in 1.18ms
+[info] Sync finished in 0.046s
+- Searching dependency tree
+✔ Rebuild Complete
+Starting inspector on 127.0.0.1:5858 failed: address already in use
+in setupCapacitorElectronPlugins
+{}
+libva error: vaGetDriverNameByIndex() failed with unknown libva error, driver_name = (null)
+[1801421:0302/203428.614878:ERROR:viz_main_impl.cc(186)] Exiting GPU process due to errors during initialization
+libva error: vaGetDriverNameByIndex() failed with unknown libva error, driver_name = (null)
+[1801428:0302/203428.797201:ERROR:command_buffer_proxy_impl.cc(128)] ContextResult::kTransientFailure: Failed to send GpuControl.CreateCommandBuffer.
+[1801381:0302/203538.621697:ERROR:zygote_communication_linux.cc(291)] Failed to send GetTerminationStatus message to zygote
+Error: ERR_FAILED (-2) loading 'capacitor-electron://-'
+    at rejectAndCleanup (node:electron/js2c/browser_init:2:85498)
+    at WebContents.stopLoadingListener (node:electron/js2c/browser_init:2:85885)
+    at WebContents.emit (node:events:513:28) {
+  errno: -2,
+  code: 'ERR_FAILED',
+  url: 'capacitor-electron://-'
+}
+[1801381:0302/203538.627624:ERROR:network_service_instance_impl.cc(625)] Network service crashed, restarting service.
+[1801381:0302/203538.631757:ERROR:zygote_communication_linux.cc(291)] Failed to send GetTerminationStatus message to zygote
+[1801381:0302/203538.633260:ERROR:gpu_process_host.cc(951)] GPU process launch failed: error_code=1002
+[1801381:0302/203538.633693:ERROR:gpu_process_host.cc(951)] GPU process launch failed: error_code=1002
+[1801381:0302/203538.634278:ERROR:gpu_process_host.cc(951)] GPU process launch failed: error_code=1002
+[1801381:0302/203538.634831:ERROR:gpu_process_host.cc(951)] GPU process launch failed: error_code=1002
+[1801381:0302/203538.635254:ERROR:gpu_process_host.cc(951)] GPU process launch failed: error_code=1002
+[1801381:0302/203538.635659:ERROR:gpu_process_host.cc(951)] GPU process launch failed: error_code=1002
+[1801381:0302/203538.635806:FATAL:gpu_data_manager_impl_private.cc(431)] GPU process isn't usable. Goodbye.
+/home/house/llms/electron/node_modules/electron/dist/electron exited with signal SIGTRAP

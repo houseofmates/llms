@@ -1,0 +1,15 @@
+[Unit]
+Description=LLMs Web Server
+After=network.target
+
+[Service]
+Type=simple
+User=house
+WorkingDirectory=/home/house/llms
+ExecStart=/usr/bin/node /home/house/llms/server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

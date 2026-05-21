@@ -1,0 +1,117 @@
+
+> llms@1.0.0 electron:make-win
+> npm run build && PATH="$(pwd)/.bin:$PATH" electron-builder build -c ./electron-builder.config.json --win
+
+
+> llms@1.0.0 build
+> cd .. && npm run build && cd electron && tsc && electron-rebuild
+
+
+> llms@1.0.0 build
+> mkdir -p dist && cp index.html dist/ && cp script.js dist/ && cp styles.css dist/ && npx cap sync
+
+✔ Copying web assets from dist to android/app/src/main/assets/public in 4.05ms
+✔ Creating capacitor.config.json in android/app/src/main/assets in 522.69μs
+✔ copy android in 9.96ms
+✔ Updating Android plugins in 863.20μs
+✔ update android in 34.09ms
+✔ copy web in 1.06ms
+✔ update web in 1.01ms
+[info] Sync finished in 0.053s
+- Searching dependency tree
+✔ Rebuild Complete
+  • electron-builder  version=23.6.0 os=6.17.9-76061709-generic
+  • loaded configuration  file=/home/house/llms/electron/electron-builder.config.json
+  • electron-rebuild not required if you use electron-builder, please consider to remove excess dependency from devDependencies
+
+To ensure your native dependencies are always matched electron version, simply add script `"postinstall": "electron-builder install-app-deps" to your `package.json`
+  • packaging       platform=win32 arch=x64 electron=26.6.10 appOutDir=dist/win-unpacked
+  • building        target=nsis file=dist/llms Setup 1.0.0.exe archs=x64 oneClick=false perMachine=false
+  ⨯ /home/house/.cache/electron-builder/nsis/nsis-3.0.4.1/linux/makensis process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE
+Exit code:
+1
+Output:
+Command line defined: "APP_ID=com.yourdoamnin.yourapp"
+Command line defined: "APP_GUID=697d781e-5108-5345-afbc-602d8328c13c"
+Command line defined: "UNINSTALL_APP_KEY=697d781e-5108-5345-afbc-602d8328c13c"
+Command line defined: "PRODUCT_NAME=llms"
+Command line defined: "PRODUCT_FILENAME=llms"
+Command line defined: "APP_FILENAME=llms"
+Command line defined: "APP_DESCRIPTION=An Amazing Capacitor App"
+Command line defined: "VERSION=1.0.0"
+Command line defined: "PROJECT_DIR=/home/house/llms/electron"
+Command line defined: "BUILD_RESOURCES_DIR=/home/house/llms/electron/resources"
+Command line defined: "APP_PACKAGE_NAME=llms"
+Command line defined: "MUI_ICON=/home/house/llms/electron/assets/appIcon.ico"
+Command line defined: "MUI_UNICON=/home/house/llms/electron/assets/appIcon.ico"
+Command line defined: "APP_64=/home/house/llms/electron/dist/llms-1.0.0-x64.nsis.7z"
+Command line defined: "APP_64_NAME=llms-1.0.0-x64.nsis.7z"
+Command line defined: "APP_64_HASH=D13FDBCDAEA031B287449F62BE14C9DBA52EE3175C423C25E098B68F33FB7A3ED9C267A67111B8D30338CCDD2EAD3B277694EF8755260040F6DA7FB5C25DABF7"
+Command line defined: "COMPANY_NAME=house"
+Command line defined: "APP_INSTALLER_STORE_FILE=llms-updater\installer.exe"
+Command line defined: "COMPRESSION_METHOD=7z"
+Command line defined: "MULTIUSER_INSTALLMODE_ALLOW_ELEVATION"
+Command line defined: "INSTALL_MODE_PER_ALL_USERS_REQUIRED"
+Command line defined: "allowToChangeInstallationDirectory"
+Command line defined: "SHORTCUT_NAME=llms"
+Command line defined: "UNINSTALL_DISPLAY_NAME=llms 1.0.0"
+Command line defined: "MUI_WELCOMEFINISHPAGE_BITMAP=${NSISDIR}\Contrib\Graphics\Wizard\nsis3-metro.bmp"
+Command line defined: "MUI_UNWELCOMEFINISHPAGE_BITMAP=${NSISDIR}\Contrib\Graphics\Wizard\nsis3-metro.bmp"
+Command line defined: "ESTIMATED_SIZE=268025"
+Command line defined: "COMPRESS=auto"
+Command line defined: "UNINSTALLER_OUT_FILE=/home/house/llms/electron/dist/__uninstaller-nsis-llms.exe"
+Processing script file: "<stdin>" (UTF8)
+
+Error output:
+File: "/home/house/llms/electron/dist/__uninstaller-nsis-llms.exe" -> no files found.
+Usage: File [/nonfatal] [/a] ([/r] [/x filespec [...]] filespec [...] |
+   /oname=outfile one_file_only)
+Error in macro installApplicationFiles on macroline 91
+!include: error in script: "installSection.nsh" on line 63
+Error in script "<stdin>" on line 190 -- aborting creation process
+  failedTask=build stackTrace=Error: /home/house/.cache/electron-builder/nsis/nsis-3.0.4.1/linux/makensis process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE
+Exit code:
+1
+Output:
+Command line defined: "APP_ID=com.yourdoamnin.yourapp"
+Command line defined: "APP_GUID=697d781e-5108-5345-afbc-602d8328c13c"
+Command line defined: "UNINSTALL_APP_KEY=697d781e-5108-5345-afbc-602d8328c13c"
+Command line defined: "PRODUCT_NAME=llms"
+Command line defined: "PRODUCT_FILENAME=llms"
+Command line defined: "APP_FILENAME=llms"
+Command line defined: "APP_DESCRIPTION=An Amazing Capacitor App"
+Command line defined: "VERSION=1.0.0"
+Command line defined: "PROJECT_DIR=/home/house/llms/electron"
+Command line defined: "BUILD_RESOURCES_DIR=/home/house/llms/electron/resources"
+Command line defined: "APP_PACKAGE_NAME=llms"
+Command line defined: "MUI_ICON=/home/house/llms/electron/assets/appIcon.ico"
+Command line defined: "MUI_UNICON=/home/house/llms/electron/assets/appIcon.ico"
+Command line defined: "APP_64=/home/house/llms/electron/dist/llms-1.0.0-x64.nsis.7z"
+Command line defined: "APP_64_NAME=llms-1.0.0-x64.nsis.7z"
+Command line defined: "APP_64_HASH=D13FDBCDAEA031B287449F62BE14C9DBA52EE3175C423C25E098B68F33FB7A3ED9C267A67111B8D30338CCDD2EAD3B277694EF8755260040F6DA7FB5C25DABF7"
+Command line defined: "COMPANY_NAME=house"
+Command line defined: "APP_INSTALLER_STORE_FILE=llms-updater\installer.exe"
+Command line defined: "COMPRESSION_METHOD=7z"
+Command line defined: "MULTIUSER_INSTALLMODE_ALLOW_ELEVATION"
+Command line defined: "INSTALL_MODE_PER_ALL_USERS_REQUIRED"
+Command line defined: "allowToChangeInstallationDirectory"
+Command line defined: "SHORTCUT_NAME=llms"
+Command line defined: "UNINSTALL_DISPLAY_NAME=llms 1.0.0"
+Command line defined: "MUI_WELCOMEFINISHPAGE_BITMAP=${NSISDIR}\Contrib\Graphics\Wizard\nsis3-metro.bmp"
+Command line defined: "MUI_UNWELCOMEFINISHPAGE_BITMAP=${NSISDIR}\Contrib\Graphics\Wizard\nsis3-metro.bmp"
+Command line defined: "ESTIMATED_SIZE=268025"
+Command line defined: "COMPRESS=auto"
+Command line defined: "UNINSTALLER_OUT_FILE=/home/house/llms/electron/dist/__uninstaller-nsis-llms.exe"
+Processing script file: "<stdin>" (UTF8)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  Error output:
+File: "/home/house/llms/electron/dist/__uninstaller-nsis-llms.exe" -> no files found.
+Usage: File [/nonfatal] [/a] ([/r] [/x filespec [...]] filespec [...] |
+   /oname=outfile one_file_only)
+Error in macro installApplicationFiles on macroline 91
+!include: error in script: "installSection.nsh" on line 63
+Error in script "<stdin>" on line 190 -- aborting creation process
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      at ChildProcess.<anonymous> (/home/house/llms/electron/node_modules/builder-util/src/util.ts:250:14)
+    at Object.onceWrapper (node:events:623:26)
+    at ChildProcess.emit (node:events:508:28)
+    at maybeClose (node:internal/child_process:1101:16)
+    at Process.ChildProcess._handle.onexit (node:internal/child_process:305:5)

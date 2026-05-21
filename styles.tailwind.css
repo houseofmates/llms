@@ -1,0 +1,1109 @@
+/* styles.css */
+
+/* tailwind directives - this file will be processed by the CLI to generate utility classes */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* reset and enforced text transform */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    /* allow both uppercase and lowercase */
+    text-transform: none;
+}
+
+body {
+    background-color: #050505;
+    color: white;
+    font-family: 'Varela Round', sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    touch-action: pan-y;
+}
+
+/* custom scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: #050505;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(245, 175, 18, 0.3);
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(245, 175, 18, 0.8);
+}
+
+/* sidebar active and hover states */
+.nav-btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    margin-bottom: 0.1rem;
+    color: #a0aec0;
+    font-size: 1rem;
+    transition: all 0.2s ease;
+    border: 1px solid transparent;
+}
+
+/* larger sidebar text on desktop */
+@media (min-width: 768px) {
+    .nav-btn {
+        font-size: 1.3rem;
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.05rem;
+    }
+}
+
+/* reduce spacing slightly all devices */
+.nav-btn {
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.1rem;
+}
+
+/* ghost placeholder for drag operations */
+.drag-ghost {
+    background: rgba(5,5,5,0.2) !important;
+    border-radius: 0.5rem;
+}
+
+/* when dragging, the chosen element can dim */
+.chosen {
+    opacity: 0.6;
+}
+
+.nav-btn:hover {
+    background-color: rgba(245, 175, 18, 0.1);
+    color: #f5af12;
+}
+
+.nav-btn.active-nav {
+    background-color: rgba(37, 161, 218, 0.1);
+    color: #25a1da;
+    border-color: rgba(37, 161, 218, 0.3);
+    font-weight: bold;
+}
+
+.app-header {
+    padding-top: max(env(safe-area-inset-top), 12px);
+    padding-bottom: 12px;
+    min-height: 64px;
+    align-items: center;
+    position: relative;
+    z-index: 50;
+    background-color: #050505;
+}
+
+.app-header #open-sidebar-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+}
+
+.app-header #open-sidebar-btn svg {
+    width: 26px;
+    height: 26px;
+}
+
+.app-header #current-model-title {
+    font-size: 1.35rem;
+    letter-spacing: 0.05em;
+    line-height: 1.2;
+}
+
+.app-header #active-site-wrapper {
+    gap: 0.9rem;
+    align-items: center;
+}
+
+.app-header #tab-strip-wrapper {
+    gap: 0.5rem;
+    padding-right: 2.5rem;
+}
+
+.app-header #tab-strip {
+    gap: 0.4rem;
+    padding-top: 2px;
+}
+
+.app-header .tab-pill {
+    min-height: 34px;
+    padding: 0.25rem 0.9rem 0.25rem 1.6rem;
+    font-size: 0.85rem;
+}
+
+.app-header .tab-pill .tab-pill-label {
+    max-width: 150px;
+}
+
+.app-header .tab-scroll-btn {
+    width: 30px;
+    height: 30px;
+    font-size: 1.3rem;
+}
+
+.app-header .tab-action-btn {
+    width: 30px;
+    height: 30px;
+    font-size: 1.4rem;
+}
+
+#tab-strip-wrapper {
+    position: relative;
+    gap: 0.35rem;
+}
+
+#tab-strip-wrapper::before,
+#tab-strip-wrapper::after {
+    content: '';
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    width: 48px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    z-index: 1;
+}
+
+#tab-strip-wrapper::before {
+    left: 0;
+    background: linear-gradient(90deg, rgba(5,5,5,1) 0%, rgba(5,5,5,0));
+}
+
+#tab-strip-wrapper::after {
+    right: 32px;
+    background: linear-gradient(-90deg, rgba(5,5,5,1) 0%, rgba(5,5,5,0));
+}
+
+#tab-strip-wrapper.has-overflow::before,
+#tab-strip-wrapper.has-overflow::after {
+    opacity: 0.55;
+}
+
+#tab-strip {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.35rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0;
+    margin: 0;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+    cursor: grab;
+}
+
+#tab-strip::-webkit-scrollbar {
+    display: none;
+}
+
+/* mobile: reduce left padding so first tab is closer to menu button */
+@media (max-width: 767px) {
+    #tab-strip-wrapper {
+        padding-left: 0.05rem !important;
+    }
+    
+    #tab-strip {
+        padding-left: 0 !important;
+    }
+    
+    #tab-strip .tab-pill:first-child {
+        margin-left: 0 !important;
+    }
+}
+
+.tab-scroll-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #f5af12;
+    background: rgba(255,255,255,0.04);
+    transition: opacity 0.2s ease, background 0.2s ease, color 0.2s ease;
+    font-size: 1.2rem;
+    line-height: 1;
+    z-index: 2;
+}
+
+.tab-scroll-btn span {
+    line-height: 1;
+    transform: translateY(-1px);
+}
+
+.tab-scroll-btn:hover {
+    background: rgba(245, 175, 18, 0.18);
+    color: #ffd37a;
+}
+
+.tab-scroll-btn--inactive {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.tab-pill {
+    cursor: pointer;
+}
+
+.tab-pill--homepage {
+    font-family: 'Varela Round', sans-serif !important;
+    position: relative;
+    padding-left: 1.6rem;
+    min-height: 30px;
+}
+
+.tab-pill-close {
+    position: absolute;
+    left: 0.35rem;
+    top: 0.35rem;
+    width: 18px;
+    height: 18px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.5);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    transition: all 0.2s ease;
+    z-index: 10;
+}
+
+.tab-pill-close:hover {
+    color: #fff;
+}
+
+/* enhanced close button for mobile/appimage with larger touch target */
+.tab-close-btn {
+    position: absolute;
+    left: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 20px;
+    height: 20px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.6);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+    z-index: 15;
+    background: transparent;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.tab-close-btn:hover,
+.tab-close-btn:active {
+    color: #fff;
+    background: rgba(255, 0, 0, 0.3);
+    transform: translateY(-50%) scale(1.1);
+}
+
+/* touch-specific enhancements for tab close buttons */
+@media (pointer: coarse) {
+    .tab-close-btn {
+        width: 24px;
+        height: 24px;
+        font-size: 12px;
+        left: 2px;
+    }
+    
+    .tab-item {
+        padding-left: 28px !important;
+    }
+}
+
+.dragging-tabs .tab-pill {
+    cursor: grabbing;
+}
+
+.tab-pill-ghost {
+    opacity: 0.4 !important;
+}
+
+.tab-pill-chosen {
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+.tab-pill {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #e0e0e0;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    text-transform: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+    transition: background 0.2s ease, color 0.2s ease, border 0.2s ease;
+    flex-shrink: 0;
+    min-height: 28px;
+    text-align: center;
+    position: relative;
+}
+
+.tab-pill-icon {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    object-fit: cover;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.3);
+}
+
+/* tab pill label centered */
+.tab-pill-label {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    text-align: center;
+    margin: 0 auto;
+}
+
+.tab-action-btn {
+    min-width: 26px;
+    height: 26px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: #f5af12;
+    font-size: 1.4rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.2rem;
+    transition: color 0.2s ease;
+}
+
+.tab-action-btn:hover {
+    color: #ffd37a;
+}
+
+.tab-pill:hover {
+    background: rgba(245, 175, 18, 0.12);
+    border-color: rgba(245, 175, 18, 0.4);
+}
+
+.tab-pill.active-tab {
+    background: rgba(245, 175, 18, 0.2);
+    border-color: rgba(245, 175, 18, 0.6);
+    color: #f5af12;
+}
+
+.tab-pill-label {
+    pointer-events: none;
+}
+
+/* glowing text class removed to remove glow effects */
+/* iframe generic fixing */
+iframe {
+    background-color: white;
+    /* 3rd party sites might assume a white bg if not set */
+}
+
+/* toast animation classes */
+/* enforce varela round font globally */
+body, * {
+    font-family: 'Varela Round', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+}
+
+.toast-show {
+    transform: translateY(0) !important;
+    opacity: 1 !important;
+}
+
+/* outline text utility for names */
+.outline-text {
+    text-shadow:
+        -2px -2px 0 #000,
+        2px -2px 0 #000,
+        -2px 2px 0 #000,
+        2px 2px 0 #000,
+        0px 3px 4px rgba(0, 0, 0, 0.8);
+}
+
+/* homepage cards / ipad style */
+
+#homepage-grid {
+    transition: transform 0.2s ease;
+    display: grid;
+    /* slightly smaller tiles to avoid scrolling */
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)) !important;
+    gap: 0.75rem;
+    justify-items: center;
+    padding: 1rem;
+    max-width: 100%;
+}
+
+/* prefer auto-fit if supported to avoid leftover narrow column */
+@supports (grid-template-columns: repeat(auto-fit, minmax(170px, 1fr))) {
+    #homepage-grid {
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)) !important;
+    }
+}
+
+.homepage-card {
+    /* prevent individual cards from shrinking narrower than intended */
+    min-width: 170px;
+    max-width: 210px;
+}
+
+/* enlarge chat sidebar text */
+#chat-sidebar {
+    font-size: 1.1rem;
+    height: 100%;
+}
+
+#chat-sidebar .text-sm {
+    font-size: 1.1rem;
+}
+#chat-sidebar button {
+    font-size: 1.1rem;
+}
+
+/* chat items in sidebar - larger font */
+#chat-list .chat-item,
+#chat-list button {
+    font-size: 1.1rem !important;
+    font-family: 'Varela Round', sans-serif !important;
+}
+
+/* mobile grid - compact multi-column layout to fit all on one screen */
+@media (max-width: 767px) {
+    #homepage-grid {
+        display: grid !important;
+        grid-template-columns: repeat(4, 1fr) !important;
+        gap: 0.15rem !important;
+        padding: 0.15rem !important;
+        align-content: start !important;
+        align-items: start !important;
+    }
+    
+    .homepage-card {
+        padding: 0.1rem !important;
+        gap: 0.1rem !important;
+        min-height: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        width: 100% !important;
+    }
+    
+    /* default: single line text for all cards */
+    .app-name {
+        font-family: 'Varela Round', sans-serif !important;
+        font-size: 0.55rem !important;
+        word-break: keep-all !important;
+        overflow-wrap: normal !important;
+        white-space: nowrap !important;
+        line-height: 1.2 !important;
+        max-width: 100% !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        margin-top: 0.05rem !important;
+        padding-bottom: 0.1rem !important;
+    }
+    
+    /* nano banana pro - allow multi-line text */
+    .homepage-card[data-id="nano-banana-pro"] .app-name {
+        white-space: normal !important;
+        line-height: 1.1 !important;
+        font-size: 0.5rem !important;
+    }
+    
+    .app-icon-square {
+        /* compact icons for multi-column grid */
+        width: 85% !important;
+        max-width: 55px !important;
+        min-width: 30px !important;
+        border-radius: 12% !important;
+        aspect-ratio: 1 !important;
+    }
+    
+    .app-icon-square img {
+        width: 70% !important;
+        height: 70% !important;
+    }
+}
+
+/* very small screens */
+@media (max-width: 380px) {
+    #homepage-grid {
+        gap: 0.125rem !important;
+        padding: 0.125rem !important;
+    }
+    
+    .homepage-card {
+        padding: 0.0625rem !important;
+        gap: 0.15rem !important;
+    }
+    
+    .app-name {
+        font-size: 0.6rem !important;
+        line-height: 1.3 !important;
+    }
+    
+    .homepage-card[data-id="nano-banana-pro"] .app-name {
+        font-size: 0.55rem !important;
+        line-height: 1.3 !important;
+    }
+
+    .app-icon-square {
+        max-width: 70px !important;
+    }
+}
+
+/* extra small screens */
+@media (max-width: 320px) {
+    .app-icon-square {
+        max-width: 60px !important;
+    }
+    
+    .app-name {
+        font-size: 0.5rem !important;
+        line-height: 1.3 !important;
+    }
+    
+    .homepage-card[data-id="nano-banana-pro"] .app-name {
+        font-size: 0.45rem !important;
+        line-height: 1.3 !important;
+    }
+}
+
+
+.homepage-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 1rem;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    text-align: center;
+    padding: 1.5rem 1.1rem;
+    width: 100%;
+    min-height: 210px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+}
+
+/* ensure cards are clickable even during sortable operations */
+.homepage-card * {
+    pointer-events: none;
+}
+
+.homepage-card.sortable-ghost {
+    opacity: 0.4;
+}
+
+.homepage-card:hover .app-icon-square {
+    transform: translateY(-6px) scale(1.04);
+    box-shadow: 0 16px 28px -6px rgba(0, 0, 0, 0.6);
+}
+
+
+.app-icon-square {
+    /* square icon, proportional width to keep aspect ratio */
+    width: 92%;
+    aspect-ratio: 1;
+    background-color: var(--card-color);
+    border-radius: 22.5%;
+    /* apple icon shape approx */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.55), inset 0 2px 6px rgba(255, 255, 255, 0.25);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+/* semi-transparent overlay for a "glass" or "gloss" effect */
+.app-icon-square::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 50%;
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0) 100%);
+    pointer-events: none;
+}
+
+.app-icon-square img {
+    width: 85%;
+    height: 85%;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+    transition: transform 0.2s;
+}
+
+.homepage-card:hover .app-icon-square img {
+    transform: scale(1.1);
+}
+
+.app-name {
+    font-family: 'Varela Round', sans-serif !important;
+    font-size: 1.35rem;
+    font-weight: 800;
+    line-height: 1.3;
+    color: var(--card-color);
+    width: 100%;
+    white-space: nowrap;
+    overflow: visible;
+    text-overflow: ellipsis;
+    letter-spacing: 0.01em;
+    padding-bottom: 0.2rem;
+}
+/* enlarge sidebar text when nano banana pro is active */
+#chat-sidebar.nano-sidebar {
+    font-size: 1.25rem;
+}
+#chat-sidebar.nano-sidebar button,
+#chat-sidebar.nano-sidebar span {
+    font-size: 1.15rem;
+}
+.larger-text { font-size: 1.05rem; }
+
+/* api chat container - flex layout with full height */
+#api-chat-container {
+    display: flex;
+    height: 100%;
+}
+
+/* chat sidebar proper height */
+#chat-sidebar {
+    height: 100%;
+    overflow: hidden;
+}
+
+/* collapsed chat sidebar state (desktop) */
+#chat-sidebar.collapsed {
+    width: 0 !important;
+    min-width: 0 !important;
+    border-right: none !important;
+    overflow: hidden !important;
+}
+
+/* when sidebar is collapsed, hide its children */
+#chat-sidebar.collapsed > * {
+    opacity: 0;
+    pointer-events: none;
+}
+
+#chat-list {
+    overflow-y: auto;
+}
+
+/* model selector wrapper styling */
+#model-selector-wrapper {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+}
+
+#model-selector-wrapper > div {
+    margin-bottom: 0;
+}
+
+/* chat messages - scrollable layout with proper padding */
+#chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 1rem;
+    padding-bottom: 300px; /* increased space for input area */
+    justify-content: flex-start !important;
+    align-items: flex-start !important;
+    scroll-behavior: smooth;
+    min-height: 0;
+}
+
+/* ensure last message is fully visible */
+#chat-messages > *:last-child {
+    margin-bottom: 150px;
+}
+
+/* centered chat input area - now handled by absolute positioning in html */
+#api-chat-container .absolute.inset-0 {
+    z-index: 5;
+}
+
+/* desktop: position chat input at bottom center */
+@media (min-width: 768px) {
+    #api-chat-container .absolute[class*="inset"] {
+        position: fixed !important;
+        top: auto !important;
+        left: 50% !important;
+        right: auto !important;
+        bottom: 80px !important;
+        width: auto !important;
+        height: auto !important;
+        padding: 0 !important;
+        pointer-events: none !important;
+        display: block !important;
+        transform: translateX(-50%) !important;
+    }
+    
+    #api-chat-container .absolute[class*="inset"] > div {
+        transform: none !important;
+        margin: 0 !important;
+        pointer-events: auto !important;
+    }
+    
+    /* when sidebar is collapsed, keep centered */
+    #api-chat-container:has(#chat-sidebar.collapsed) .absolute[class*="inset"] {
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+    }
+}
+
+/* chat input box styling - yellow glow instead of blue */
+#api-chat-container .absolute.inset-0 .rounded-2xl {
+    box-shadow: 0 0 40px rgba(245, 175, 18, 0.15);
+}
+
+/* disable box-shadow globally for performance (optional) */
+/* * { box-shadow: none !important; } */
+
+/* reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* low performance mode - disable shadows */
+.low-performance-mode .app-icon-square,
+.low-performance-mode .homepage-card:hover .app-icon-square {
+    box-shadow: none !important;
+}
+
+/* performance: remove expensive filters on mobile */
+@media (max-width: 767px) {
+    /* remove box-shadow from app-icon-square */
+    .app-icon-square {
+        box-shadow: none !important;
+    }
+    
+    /* remove drop-shadow from app-icon-square img */
+    .app-icon-square img {
+        filter: none !important;
+    }
+    
+    /* remove box-shadow from homepage-card hover */
+    .homepage-card:hover .app-icon-square {
+        box-shadow: none !important;
+    }
+    
+    /* remove chat input box glow */
+    #api-chat-container .absolute.inset-0 .rounded-2xl {
+        box-shadow: none !important;
+    }
+}
+
+/* mobile chat sidebar */
+@media (max-width: 767px) {
+    #chat-sidebar {
+        position: fixed !important;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 260px !important;
+        z-index: 100;
+        transform: translateX(-100%);
+        transition: transform 0.3s ease;
+    }
+    
+    #chat-sidebar.flex {
+        transform: translateX(0);
+    }
+    
+    #chat-sidebar.hidden {
+        transform: translateX(-100%);
+    }
+    
+    /* overlay when sidebar is open */
+    #chat-sidebar::before {
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 260px;
+        right: 0;
+        bottom: 0;
+        background: rgba(0,0,0,0.5);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+    }
+    
+    #chat-sidebar.flex::before {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
+
+/* mobile webview fullscreen styles */
+@media (max-width: 767px) {
+    /* iframe fullscreen for mobile webview */
+    #webview-container {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        height: -webkit-fill-available !important; /* ios safari fix */
+        height: 100dvh !important; /* dynamic viewport height */
+        z-index: 30 !important;
+        border: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+    }
+    
+    /* ensure homepage is completely hidden when webview is active */
+    #homepage-container.hidden {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+    
+    /* ensure iframe takes full width/height */
+    #webview-container iframe {
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100vw !important;
+        max-height: 100vh !important;
+    }
+    
+    /* fix iframe positioning */
+    #webview-container iframe {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        border: none !important;
+    }
+    
+    /* fix overflow issues with api-chat-container */
+    #api-chat-container {
+        width: 100% !important;
+        max-width: 100vw !important;
+        overflow-x: hidden !important;
+        position: relative !important;
+        height: 100% !important;
+    }
+    
+    /* mobile: ensure chat messages scroll properly */
+    #chat-messages {
+        height: auto !important;
+        max-height: calc(100vh - 250px) !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        padding-bottom: 350px !important; /* increased space for input box */
+        justify-content: flex-start !important;
+        align-items: flex-start !important;
+    }
+    
+    /* ensure last message is fully visible on mobile */
+    #chat-messages > *:last-child {
+        margin-bottom: 180px !important;
+    }
+    
+    /* ensure webview renders without cutoffs */
+    #webview-view {
+        width: 100% !important;
+        height: 100% !important;
+        overflow: hidden !important;
+    }
+    
+    /* iframe should scale properly for mobile sites */
+    #webview-container iframe {
+        transform-origin: top left !important;
+    }
+    
+    /* remove translateX offset on chat input - center it properly */
+    #api-chat-container .absolute.inset-0 {
+        transform: translateX(0) !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+    }
+    
+    /* ensure chat input container is full width on mobile */
+    #api-chat-container .absolute.bottom-0 {
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        padding-left: 0.5rem !important;
+        padding-right: 0.5rem !important;
+    }
+}
+
+/* desktop webview */
+@media (min-width: 768px) {
+    #webview-container {
+        width: 100%;
+        height: 100%;
+        border: none;
+    }
+}
+
+/* very small screens - additional iframe fixes */
+@media (max-width: 380px) {
+    #webview-container iframe {
+        width: 100% !important;
+        min-width: 100% !important;
+    }
+    
+    #api-chat-container {
+        min-width: 0 !important;
+    }
+}
+
+/* desktop sidebar toggle override */
+@media (min-width: 768px) {
+    #sidebar.desktop-hidden {
+        transform: translateX(-100%) !important;
+        margin-left: -16rem !important; /* w-64 = 16rem */
+    }
+}
+
+/* touch drag styles - copied from images app grid.js */
+#homepage-grid.is-dragging {
+  touch-action: none;
+  overflow: hidden;
+}
+
+/* dragging card is invisible but stays in layout - no reflow, no flicker */
+.homepage-card.dragging {
+  opacity: 0 !important;
+  pointer-events: none;
+  transform: none !important;
+}
+
+/* drop-target indicators - yellow border around target card */
+.homepage-card.drag-insert-before,
+.homepage-card.drag-insert-after {
+  box-shadow: 0 0 0 3px #f5af12 !important;
+  border-color: #f5af12 !important;
+  z-index: 5;
+}
+
+/* suppress hover effects while dragging */
+#homepage-grid.is-dragging .homepage-card:not(.dragging):not(.drag-insert-before):not(.drag-insert-after):hover,
+#homepage-grid.is-dragging .homepage-card:not(.dragging):not(.drag-insert-before):not(.drag-insert-after):active {
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+/* suppress transitions during drag */
+#homepage-grid.is-dragging .app-icon-square {
+  transition: none !important;
+}
+
+/* touch drag floating clone */
+.touch-drag-clone {
+  position: fixed;
+  z-index: 10000;
+  opacity: 0.85;
+  pointer-events: none;
+  transform: scale(1.05);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  border-radius: 22.5%;
+}
+
+.touch-drag-clone .app-icon-square {
+  width: 100%;
+  height: 100%;
+}
+
+/* suppress all transitions on homepage cards while dragging */
+#homepage-grid.is-dragging .homepage-card {
+    transition: none !important;
+}
+
+/* android apk specific styles */
+body.android-apk ::-webkit-scrollbar {
+    width: 4px;
+}
+
+body.android-apk ::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 0;
+}
+
+body.android-apk ::-webkit-scrollbar-thumb {
+    background: rgba(245, 175, 18, 0.5);
+    border-radius: 2px;
+}
+
+/* android: scrollbar hide when not scrolling */
+body.android-apk .scrollbar-hidden::-webkit-scrollbar {
+    display: none;
+}
+
+body.android-apk .scrollbar-hidden {
+    scrollbar-width: none;
+}
+
+/* ensure scroll containers extend to edge */
+body.android-apk #chat-messages,
+body.android-apk #chat-list,
+body.android-apk #homepage-grid {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(245, 175, 18, 0.5) transparent;
+}
+
+/* android: move chat input up so bottom isn't cut off */
+body.android-apk #api-chat-container .w-full.py-4.shrink-0 {
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom, 20px)) !important;
+}
+
+/* android: add safe area padding to the api-chat-container */
+body.android-apk #api-chat-container {
+    padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+}
+
+/* android: adjust chat messages padding to account for raised input */
+body.android-apk #chat-messages {
+    padding-bottom: calc(300px + env(safe-area-inset-bottom, 20px)) !important;
+}
+
+body.android-apk #chat-messages > *:last-child {
+    margin-bottom: calc(120px + env(safe-area-inset-bottom, 10px)) !important;
+}

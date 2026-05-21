@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">llms</string>
+    <string name="title_activity_main">llms</string>
+    <string name="package_name">space.houseofmates.llms</string>
+    <string name="custom_url_scheme">space.houseofmates.llms</string>
+</resources>
