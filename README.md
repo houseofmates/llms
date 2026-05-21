@@ -4,10 +4,6 @@ llms is a unified interface for all the ai chat services you actually want to us
 
 it runs as a web page, packages as electron builds for desktop, and builds as an android apk through capacitor. one codebase for all three.
 
-<h2 align="center">background</h2>
-
-the streaming response for ollama and openrouter is there because typing into a blank box and waiting five seconds for the first token is unbearable. the image attachment button is next to the send button because tabbing around a modal to add an image is overhead you do not need.
-
 <h2 align="center">features</h2>
 
 - **unified dashboard** — one view for every ai service you use. card grid, reorderable, themable.
