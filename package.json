@@ -29,13 +29,13 @@
     "@capacitor/android": "^8.1.0",
     "@capacitor/cli": "^8.1.0",
     "chokidar-cli": "^3.0.0",
-    "electron": "^40.6.1",
+    "electron": "^40.8.5",
     "eslint": "^8.57.0",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^30.2.0",
     "prettier": "^3.2.5",
     "tailwindcss": "^3.4.0",
-    "postcss": "^8.4.0",
+    "postcss": "^8.5.15",
     "autoprefixer": "^10.4.0"
   }
 }
