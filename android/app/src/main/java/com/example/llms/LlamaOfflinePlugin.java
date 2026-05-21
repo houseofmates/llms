@@ -1,4 +1,4 @@
-package space.houseofmates.llms;
+package com.example.llms;
 
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;

@@ -1,4 +1,4 @@
-package space.houseofmates.llms;
+package com.example.llms;
 
 import android.app.Activity;
 import android.content.Intent;

@@ -4,13 +4,13 @@
   "description": "An Amazing Capacitor App",
   "author": {
     "name": "house",
-    "email": "house@houseofmates.space"
+    "email": "house@example.com"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/house/llms"
   },
-  "homepage": "https://houseofmates.space",
+  "homepage": "https://example.com",
   "license": "MIT",
   "main": "build/src/index.js",
   "scripts": {

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fix Cloudflare tunnel config for ai.houseofmates.space
+# Fix Cloudflare tunnel config for ai.example.com
 
 CONFIG_FILE="/etc/cloudflared/config.yml"
 BACKUP_FILE="/etc/cloudflared/config.yml.bak.$(date +%Y%m%d_%H%M%S)"
@@ -8,14 +8,14 @@ BACKUP_FILE="/etc/cloudflared/config.yml.bak.$(date +%Y%m%d_%H%M%S)"
 sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
 echo "Backed up config to $BACKUP_FILE"
 
-# Remove duplicate ai.houseofmates.space entry (port 3000) and keep only port 5053
+# Remove duplicate ai.example.com entry (port 3000) and keep only port 5053
 sudo python3 << 'EOF'
 import re
 
 with open("/etc/cloudflared/config.yml", "r") as f:
     lines = f.readlines()
 
-# Find and remove the first ai.houseofmates.space entry (pointing to port 3000)
+# Find and remove the first ai.example.com entry (pointing to port 3000)
 new_lines = []
 skip_next = False
 ai_count = 0
@@ -25,14 +25,14 @@ for i, line in enumerate(lines):
         skip_next = False
         continue
     
-    # Check if this is an ai.houseofmates.space entry pointing to port 3000
-    if "hostname: ai.houseofmates.space" in line:
+    # Check if this is an ai.example.com entry pointing to port 3000
+    if "hostname: ai.example.com" in line:
         ai_count += 1
         # Check if the next service line points to port 3000
         if i + 1 < len(lines) and "service: http://127.0.0.1:3000" in lines[i + 1]:
             # Skip both the hostname and service lines
             skip_next = True
-            print(f"Removed first ai.houseofmates.space entry pointing to port 3000")
+            print(f"Removed first ai.example.com entry pointing to port 3000")
             continue
     
     new_lines.append(line)
@@ -40,13 +40,13 @@ for i, line in enumerate(lines):
 with open("/etc/cloudflared/config.yml", "w") as f:
     f.writelines(new_lines)
 
-print(f"Config updated. Found {ai_count} ai.houseofmates.space entries, removed 1")
+print(f"Config updated. Found {ai_count} ai.example.com entries, removed 1")
 EOF
 
 # Validate the config
 echo ""
-echo "Updated config (ai.houseofmates.space entries):"
-grep -A 1 "ai.houseofmates.space" /etc/cloudflared/config.yml
+echo "Updated config (ai.example.com entries):"
+grep -A 1 "ai.example.com" /etc/cloudflared/config.yml
 
 echo ""
 echo "Restarting cloudflared service..."

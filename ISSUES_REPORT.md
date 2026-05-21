@@ -97,7 +97,7 @@ chat had never been synced.
 ### ✅ 10. NocoBase URL hardcoded - FIXED
 **location:** script.js - `getNocoBaseConfig()`
 **severity:** low (flexibility)
-**issue:** URL was fixed to `https://db.houseofmates.space`
+**issue:** URL was fixed to `https://db.example.com`
 **fix:** 
 - URL now configurable via localStorage
 - added URL input field to API settings modal

@@ -652,7 +652,7 @@ function captureActiveTabSession() {
 
 function _getTabIconSource(tab) {
     const model = getModelById(tab.id) || {};
-    return getCardIcon(tab.id, model.domain || 'houseofmates.space');
+    return getCardIcon(tab.id, model.domain || 'example.com');
 }
 
 function loadTabSessions() {
@@ -3441,7 +3441,7 @@ async function processApiMessage(text) {
             }
             // build headers - auth only if key exists (free models don't need it)
             const headers = {
-                'HTTP-Referer': 'https://houseofmates.space',
+                'HTTP-Referer': 'https://example.com',
                 'X-Title': 'LLMs Aggregator',
                 'Content-Type': 'application/json'
             };
@@ -4575,9 +4575,9 @@ function updateAttachmentUI() {
 // chat management functions
 // ---------- noco base helpers ----------
 function getNocoBaseConfig() {
-    // url is configurable for self-hosting, defaults to houseofmates domain
+    // url is configurable for self-hosting, defaults to a generic domain
     return {
-        url: localStorage.getItem('llms_nocobase_url') || 'https://db.houseofmates.space',
+        url: localStorage.getItem('llms_nocobase_url') || 'https://db.example.com',
         apiKey: localStorage.getItem('llms_nocobase_key') || ''
     };
 }
@@ -5901,7 +5901,7 @@ window.addEventListener('resize', fitHomepage);
                                 llamaOfflineManager.modelStatus = {
                                     downloaded: true,
                                     modelId: recommended.id,
-                                    path: '/data/data/space.houseofmates.llms/files/models/gemma-4-e4b-q4.gguf',
+                                    path: '/data/data/com.example.llms/files/models/gemma-4-e4b-q4.gguf',
                                     size: recommended.size,
                                     version: '1.0.0',
                                     downloadProgress: 100

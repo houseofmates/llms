@@ -30,7 +30,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="llms" />
-                <data android:scheme="space.houseofmates.llms" />
+                <data android:scheme="com.example.llms" />
             </intent-filter>
 
             <!-- Grok -->

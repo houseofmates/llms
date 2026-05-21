@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">llms</string>
     <string name="title_activity_main">llms</string>
-    <string name="package_name">space.houseofmates.llms</string>
-    <string name="custom_url_scheme">space.houseofmates.llms</string>
+    <string name="package_name">com.example.llms</string>
+    <string name="custom_url_scheme">com.example.llms</string>
 </resources>

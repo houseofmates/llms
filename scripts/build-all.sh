@@ -43,7 +43,7 @@ if [ -f "$APK_PATH" ]; then
     if [ ! -f "$KEYSTORE" ]; then
         mkdir -p "$CERT_DIR"
         echo "generating debug keystore at $KEYSTORE"
-        keytool -genkeypair -v -keystore "$KEYSTORE" -alias llmsdebug -storepass android -keypass android -dname "CN=house, OU=llms, O=houseofmates, L=home, S=state, C=US" -keyalg RSA -keysize 2048 -validity 10000
+        keytool -genkeypair -v -keystore "$KEYSTORE" -alias llmsdebug -storepass android -keypass android -dname "CN=Your Name, OU=Development, O=Example Org, L=City, S=State, C=US" -keyalg RSA -keysize 2048 -validity 10000
     fi
     # sign and zipalign
     FINAL_APK="../releases/llms.apk"

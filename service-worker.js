@@ -44,7 +44,7 @@ self.addEventListener('fetch', (event) => {
     }
 
     // network-first for ollama api so responses are always fresh
-    if (url.hostname === 'ollama.houseofmates.space') {
+    if (url.hostname === 'ollama.example.com') {
         event.respondWith(
             fetch(request).catch(() => new Response(JSON.stringify({ error: 'offline' }), { status: 503 }))
         );
