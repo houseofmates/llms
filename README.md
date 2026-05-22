@@ -4,7 +4,25 @@ llms is a unified interface for all the ai chat services you actually want to us
 
 it runs as a web page, packages as electron builds for desktop, and builds as an android apk through capacitor. one codebase for all three.
 
-<h2 align="center">features</h2>
+<h2 align="center">featurmates license
+
+copyright (c) 2026 house of mates
+
+permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "software"), to fork the existing 
+codebase or utilize the code from it in one's own projects so long as financial profit is 
+not to be gained by said code/software created by the code.
+
+PKM IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE HOUSE OF MATES
+SYSTEM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE. PKM WAS INITIALLY, AND ONLY MADE TO BE USED
+BY THE HOUSE OF MATES SYSTEM. OTHER USERS WERE NEVER IN MIND FOR THIS PROJECT, AND YOU
+ARE EXPECTED TO CHANGE SIGNIFICANT PARTS OF THE CODEBASE TO ADAPT TO YOUR OWN PREFERENCES
+AND NEEDS BASED ON THE DIFFERENCES IN HOW YOUR BRAIN WORKS VS. THE HOUSE OF MATES SYSTEM'S.
+es</h2>
 
 - **unified dashboard** — one view for every ai service you use. card grid, reorderable, themable.
 - **webview models** — embedded chromium browser inside the app for gemini, chatgpt, claude, and others. oauth flows just work.
@@ -48,4 +66,4 @@ configuration for api models lives in the app settings. store your openrouter ke
 
 <h1 align="center">license</h1>
 
-isc license
+[mates license](license)
