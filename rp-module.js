@@ -273,7 +273,209 @@ class ApiKeyPool {
 }
 
 // =====================================================
-// rp storage manager
+// nocobase sync manager for rp data
+// =====================================================
+class RPNocoBaseSync {
+    constructor() {
+        this.collectionName = 'rp_data';
+        this.syncQueue = [];
+        this.isSyncing = false;
+        this.lastSyncTime = 0;
+        this.syncDebounceMs = 1000;
+        this.pendingSyncTimeout = null;
+    }
+
+    // get nocobase config from main app (reuse existing config)
+    getConfig() {
+        // use the main app's nocobase config
+        const url = localStorage.getItem('llms_nocobase_url') || 'https://db.houseofmates.space';
+        const apiKey = localStorage.getItem('llms_nocobase_key') || '';
+        return { url: url.replace(/\/+$/, ''), apiKey };
+    }
+
+    isConfigured() {
+        const { url, apiKey } = this.getConfig();
+        return !!(url && apiKey);
+    }
+
+    async ensureCollection() {
+        const { url, apiKey } = this.getConfig();
+        if (!url || !apiKey) return false;
+
+        try {
+            // check if collection exists
+            const check = await fetch(`${url}/api/collections/${this.collectionName}`, {
+                headers: { Authorization: `Bearer ${apiKey}` }
+            });
+            if (check.ok) {
+                console.log('[rp] nocobase collection exists');
+                return true;
+            }
+        } catch (e) {
+            console.log('[rp] collection check failed, will try to create');
+        }
+
+        // create collection with fields for rp data
+        try {
+            console.log('[rp] creating nocobase collection...');
+            const createRes = await fetch(`${url}/api/collections`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    name: this.collectionName,
+                    title: 'RP Data',
+                    fields: [
+                        { name: 'dataId', type: 'string', unique: true, required: true },
+                        { name: 'dataType', type: 'string', required: true }, // 'character', 'persona', 'chat', 'lorebook', 'settings'
+                        { name: 'data', type: 'text', required: true } // json stringified data
+                    ]
+                })
+            });
+
+            if (createRes.ok || createRes.status === 409) {
+                console.log('[rp] nocobase collection ready');
+                return true;
+            } else {
+                const err = await createRes.text();
+                console.error('[rp] failed to create collection:', err);
+                return false;
+            }
+        } catch (e) {
+            console.error('[rp] failed to create nocobase collection', e);
+            return false;
+        }
+    }
+
+    async loadAll(dataType) {
+        const { url, apiKey } = this.getConfig();
+        if (!url || !apiKey) return [];
+
+        try {
+            await this.ensureCollection();
+            const res = await fetch(
+                `${url}/api/${this.collectionName}:list?filter[dataType]=${dataType}&pageSize=500`,
+                { headers: { Authorization: `Bearer ${apiKey}` } }
+            );
+
+            if (!res.ok) {
+                console.warn('[rp] failed to load from nocobase:', res.status);
+                return [];
+            }
+
+            const result = await res.json();
+            const records = result.data || [];
+            console.log(`[rp] loaded ${records.length} ${dataType} records from nocobase`);
+
+            return records.map(r => {
+                try {
+                    return { id: r.dataId, ...JSON.parse(r.data), _nocobaseId: r.id };
+                } catch (e) {
+                    console.warn('[rp] failed to parse record:', r.dataId);
+                    return null;
+                }
+            }).filter(Boolean);
+        } catch (e) {
+            console.error('[rp] nocobase load error:', e);
+            return [];
+        }
+    }
+
+    async saveRecord(dataType, dataId, data) {
+        const { url, apiKey } = this.getConfig();
+        if (!url || !apiKey) {
+            console.log('[rp] nocobase not configured, skipping cloud save');
+            return false;
+        }
+
+        // debounce saves
+        if (this.pendingSyncTimeout) {
+            clearTimeout(this.pendingSyncTimeout);
+        }
+
+        return new Promise((resolve) => {
+            this.pendingSyncTimeout = setTimeout(async () => {
+                try {
+                    await this.ensureCollection();
+
+                    // check if record exists
+                    const checkRes = await fetch(
+                        `${url}/api/${this.collectionName}:list?filter[dataId]=${encodeURIComponent(dataId)}`,
+                        { headers: { Authorization: `Bearer ${apiKey}` } }
+                    );
+                    const checkData = await checkRes.json();
+                    const existing = (checkData.data || []).find(r => r.dataId === dataId);
+
+                    const payload = {
+                        dataId,
+                        dataType,
+                        data: JSON.stringify(data)
+                    };
+
+                    if (existing) {
+                        // update
+                        await fetch(`${url}/api/${this.collectionName}:update?filterByTk=${existing.id}`, {
+                            method: 'POST',
+                            headers: {
+                                Authorization: `Bearer ${apiKey}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(payload)
+                        });
+                    } else {
+                        // create
+                        await fetch(`${url}/api/${this.collectionName}:create`, {
+                            method: 'POST',
+                            headers: {
+                                Authorization: `Bearer ${apiKey}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(payload)
+                        });
+                    }
+
+                    console.log(`[rp] saved ${dataType}/${dataId} to nocobase`);
+                    resolve(true);
+                } catch (e) {
+                    console.error('[rp] nocobase save error:', e);
+                    resolve(false);
+                }
+            }, this.syncDebounceMs);
+        });
+    }
+
+    async deleteRecord(dataId) {
+        const { url, apiKey } = this.getConfig();
+        if (!url || !apiKey) return false;
+
+        try {
+            // find record
+            const checkRes = await fetch(
+                `${url}/api/${this.collectionName}:list?filter[dataId]=${encodeURIComponent(dataId)}`,
+                { headers: { Authorization: `Bearer ${apiKey}` } }
+            );
+            const checkData = await checkRes.json();
+            const existing = (checkData.data || []).find(r => r.dataId === dataId);
+
+            if (existing) {
+                await fetch(`${url}/api/${this.collectionName}:destroy?filterByTk=${existing.id}`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${apiKey}` }
+                });
+                console.log(`[rp] deleted ${dataId} from nocobase`);
+            }
+            return true;
+        } catch (e) {
+            console.error('[rp] nocobase delete error:', e);
+            return false;
+        }
+    }
+}
+
+// =====================================================
+// rp storage manager (with nocobase sync)
 // =====================================================
 class RPStorage {
     constructor() {
@@ -282,36 +484,190 @@ class RPStorage {
         this.chats = new Map();
         this.lorebooks = new Map();
         this.settings = {};
+        this.nocobase = new RPNocoBaseSync();
+        this.isLoaded = false;
         this.loadAll();
     }
 
-    loadAll() {
-        this.loadCharacters();
-        this.loadPersonas();
-        this.loadChats();
-        this.loadLorebooks();
-        this.loadSettings();
+    async loadAll() {
+        // load from localStorage first (fast)
+        this.loadCharactersLocal();
+        this.loadPersonasLocal();
+        this.loadChatsLocal();
+        this.loadLorebooksLocal();
+        this.loadSettingsLocal();
+
+        // then try to sync from nocobase (if configured)
+        if (this.nocobase.isConfigured()) {
+            await this.syncFromNocoBase();
+        }
+
+        this.isLoaded = true;
     }
 
-    // characters
-    loadCharacters() {
+    async syncFromNocoBase() {
+        try {
+            console.log('[rp] syncing from nocobase...');
+
+            // load characters
+            const characters = await this.nocobase.loadAll('character');
+            if (characters.length > 0) {
+                characters.forEach(c => {
+                    this.characters.set(c.id, new CharacterCard(c));
+                });
+                this.saveCharactersLocal(); // cache locally
+                console.log(`[rp] synced ${characters.length} characters from cloud`);
+            }
+
+            // load personas
+            const personas = await this.nocobase.loadAll('persona');
+            if (personas.length > 0) {
+                personas.forEach(p => {
+                    this.personas.set(p.id, new Persona(p));
+                });
+                this.savePersonasLocal();
+                console.log(`[rp] synced ${personas.length} personas from cloud`);
+            }
+
+            // load chats
+            const chats = await this.nocobase.loadAll('chat');
+            if (chats.length > 0) {
+                chats.forEach(c => {
+                    this.chats.set(c.id, c);
+                });
+                this.saveChatsLocal();
+                console.log(`[rp] synced ${chats.length} chats from cloud`);
+            }
+
+            // load lorebooks
+            const lorebooks = await this.nocobase.loadAll('lorebook');
+            if (lorebooks.length > 0) {
+                lorebooks.forEach(l => {
+                    this.lorebooks.set(l.id, l.entries.map(e => new LorebookEntry(e)));
+                });
+                this.saveLorebooksLocal();
+            }
+
+            // load settings
+            const settings = await this.nocobase.loadAll('settings');
+            if (settings.length > 0) {
+                this.settings = settings[0] || {};
+                this.saveSettingsLocal();
+            }
+
+            if (typeof showToast === 'function' && (characters.length > 0 || personas.length > 0)) {
+                showToast(`synced ${characters.length} characters from cloud`);
+            }
+        } catch (e) {
+            console.error('[rp] nocobase sync error:', e);
+        }
+    }
+
+    // ---- local storage methods (fast cache) ----
+
+    loadCharactersLocal() {
         try {
             const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.CHARACTERS) || '[]');
             this.characters = new Map(data.map(c => [c.id, new CharacterCard(c)]));
         } catch (e) {
-            console.warn('[rp] failed to load characters:', e);
+            console.warn('[rp] failed to load characters locally:', e);
             this.characters = new Map();
         }
     }
 
-    saveCharacters() {
+    saveCharactersLocal() {
         try {
             const data = Array.from(this.characters.values());
             localStorage.setItem(RP_STORAGE_KEYS.CHARACTERS, JSON.stringify(data));
         } catch (e) {
-            console.error('[rp] failed to save characters:', e);
+            console.error('[rp] failed to save characters locally:', e);
         }
     }
+
+    loadPersonasLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.PERSONAS) || '[]');
+            this.personas = new Map(data.map(p => [p.id, new Persona(p)]));
+
+            // create default persona if none exist
+            if (this.personas.size === 0) {
+                const defaultPersona = new Persona({ name: 'you', isDefault: true });
+                this.personas.set(defaultPersona.id, defaultPersona);
+                this.savePersonas();
+            }
+        } catch (e) {
+            console.warn('[rp] failed to load personas locally:', e);
+            this.personas = new Map();
+        }
+    }
+
+    savePersonasLocal() {
+        try {
+            const data = Array.from(this.personas.values());
+            localStorage.setItem(RP_STORAGE_KEYS.PERSONAS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save personas locally:', e);
+        }
+    }
+
+    loadChatsLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.CHATS) || '{}');
+            this.chats = new Map(Object.entries(data));
+        } catch (e) {
+            console.warn('[rp] failed to load chats locally:', e);
+            this.chats = new Map();
+        }
+    }
+
+    saveChatsLocal() {
+        try {
+            const data = Object.fromEntries(this.chats);
+            localStorage.setItem(RP_STORAGE_KEYS.CHATS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save chats locally:', e);
+        }
+    }
+
+    loadLorebooksLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.LOREBOOKS) || '{}');
+            this.lorebooks = new Map(Object.entries(data).map(([id, entries]) => [
+                id,
+                entries.map(e => new LorebookEntry(e))
+            ]));
+        } catch (e) {
+            console.warn('[rp] failed to load lorebooks locally:', e);
+            this.lorebooks = new Map();
+        }
+    }
+
+    saveLorebooksLocal() {
+        try {
+            const data = Object.fromEntries(this.lorebooks);
+            localStorage.setItem(RP_STORAGE_KEYS.LOREBOOKS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save lorebooks locally:', e);
+        }
+    }
+
+    loadSettingsLocal() {
+        try {
+            this.settings = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.SETTINGS) || '{}');
+        } catch (e) {
+            this.settings = {};
+        }
+    }
+
+    saveSettingsLocal() {
+        try {
+            localStorage.setItem(RP_STORAGE_KEYS.SETTINGS, JSON.stringify(this.settings));
+        } catch (e) {
+            console.error('[rp] failed to save settings locally:', e);
+        }
+    }
+
+    // ---- public api (saves to both local and cloud) ----
 
     getCharacter(id) {
         return this.characters.get(id);
@@ -324,42 +680,23 @@ class RPStorage {
     saveCharacter(character) {
         character.updatedAt = new Date().toISOString();
         this.characters.set(character.id, character);
-        this.saveCharacters();
+        this.saveCharactersLocal();
+
+        // sync to nocobase in background
+        this.nocobase.saveRecord('character', character.id, character);
+
         return character;
     }
 
     deleteCharacter(id) {
         this.characters.delete(id);
-        this.saveCharacters();
+        this.saveCharactersLocal();
+
+        // delete from nocobase
+        this.nocobase.deleteRecord(id);
+
         // also delete associated chats
         this.deleteChatsForCharacter(id);
-    }
-
-    // personas
-    loadPersonas() {
-        try {
-            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.PERSONAS) || '[]');
-            this.personas = new Map(data.map(p => [p.id, new Persona(p)]));
-
-            // create default persona if none exist
-            if (this.personas.size === 0) {
-                const defaultPersona = new Persona({ name: 'you', isDefault: true });
-                this.personas.set(defaultPersona.id, defaultPersona);
-                this.savePersonas();
-            }
-        } catch (e) {
-            console.warn('[rp] failed to load personas:', e);
-            this.personas = new Map();
-        }
-    }
-
-    savePersonas() {
-        try {
-            const data = Array.from(this.personas.values());
-            localStorage.setItem(RP_STORAGE_KEYS.PERSONAS, JSON.stringify(data));
-        } catch (e) {
-            console.error('[rp] failed to save personas:', e);
-        }
     }
 
     getPersona(id) {
@@ -376,7 +713,6 @@ class RPStorage {
             if (activeId && this.personas.has(activeId)) {
                 return this.personas.get(activeId);
             }
-            // return default persona
             return Array.from(this.personas.values()).find(p => p.isDefault) || Array.from(this.personas.values())[0];
         } catch (e) {
             return Array.from(this.personas.values())[0];
@@ -390,7 +726,11 @@ class RPStorage {
     savePersona(persona) {
         persona.updatedAt = new Date().toISOString();
         this.personas.set(persona.id, persona);
-        this.savePersonas();
+        this.savePersonasLocal();
+
+        // sync to nocobase
+        this.nocobase.saveRecord('persona', persona.id, persona);
+
         return persona;
     }
 
@@ -401,37 +741,21 @@ class RPStorage {
             return false;
         }
         this.personas.delete(id);
-        this.savePersonas();
+        this.savePersonasLocal();
+        this.nocobase.deleteRecord(id);
         return true;
     }
 
     // chats
-    loadChats() {
-        try {
-            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.CHATS) || '{}');
-            this.chats = new Map(Object.entries(data));
-        } catch (e) {
-            console.warn('[rp] failed to load chats:', e);
-            this.chats = new Map();
-        }
-    }
-
-    saveChats() {
-        try {
-            const data = Object.fromEntries(this.chats);
-            localStorage.setItem(RP_STORAGE_KEYS.CHATS, JSON.stringify(data));
-        } catch (e) {
-            console.error('[rp] failed to save chats:', e);
-        }
-    }
-
     getChat(characterId) {
         return this.chats.get(characterId) || { messages: [], branches: ['main'] };
     }
 
     saveChat(characterId, chatData) {
         this.chats.set(characterId, chatData);
-        this.saveChats();
+        this.saveChatsLocal();
+        // sync to nocobase
+        this.nocobase.saveRecord('chat', characterId, { id: characterId, ...chatData });
     }
 
     addMessage(characterId, message) {
@@ -449,44 +773,25 @@ class RPStorage {
 
     deleteChatsForCharacter(characterId) {
         this.chats.delete(characterId);
-        this.saveChats();
+        this.saveChatsLocal();
+        this.nocobase.deleteRecord(characterId);
     }
 
     clearChat(characterId) {
         this.chats.set(characterId, { messages: [], branches: ['main'] });
-        this.saveChats();
+        this.saveChatsLocal();
+        this.nocobase.saveRecord('chat', characterId, { id: characterId, messages: [], branches: ['main'] });
     }
 
     // lorebooks
-    loadLorebooks() {
-        try {
-            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.LOREBOOKS) || '{}');
-            this.lorebooks = new Map(Object.entries(data).map(([id, entries]) => [
-                id,
-                entries.map(e => new LorebookEntry(e))
-            ]));
-        } catch (e) {
-            console.warn('[rp] failed to load lorebooks:', e);
-            this.lorebooks = new Map();
-        }
-    }
-
-    saveLorebooks() {
-        try {
-            const data = Object.fromEntries(this.lorebooks);
-            localStorage.setItem(RP_STORAGE_KEYS.LOREBOOKS, JSON.stringify(data));
-        } catch (e) {
-            console.error('[rp] failed to save lorebooks:', e);
-        }
-    }
-
     getLorebook(id) {
         return this.lorebooks.get(id) || [];
     }
 
     saveLorebook(id, entries) {
         this.lorebooks.set(id, entries);
-        this.saveLorebooks();
+        this.saveLorebooksLocal();
+        this.nocobase.saveRecord('lorebook', id, { id, entries });
     }
 
     getMatchingLoreEntries(lorebookId, text) {
@@ -495,29 +800,45 @@ class RPStorage {
     }
 
     // settings
-    loadSettings() {
-        try {
-            this.settings = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.SETTINGS) || '{}');
-        } catch (e) {
-            this.settings = {};
-        }
-    }
-
-    saveSettings() {
-        try {
-            localStorage.setItem(RP_STORAGE_KEYS.SETTINGS, JSON.stringify(this.settings));
-        } catch (e) {
-            console.error('[rp] failed to save settings:', e);
-        }
-    }
-
     getSetting(key, defaultValue = null) {
         return this.settings[key] ?? defaultValue;
     }
 
     setSetting(key, value) {
         this.settings[key] = value;
-        this.saveSettings();
+        this.saveSettingsLocal();
+        this.nocobase.saveRecord('settings', 'rp_settings', this.settings);
+    }
+
+    // force sync to cloud
+    async forceSync() {
+        if (!this.nocobase.isConfigured()) {
+            if (typeof showToast === 'function') {
+                showToast('nocobase not configured - go to settings to add your api key');
+            }
+            return false;
+        }
+
+        try {
+            // push all data to cloud
+            for (const [id, char] of this.characters) {
+                await this.nocobase.saveRecord('character', id, char);
+            }
+            for (const [id, persona] of this.personas) {
+                await this.nocobase.saveRecord('persona', id, persona);
+            }
+            for (const [id, chat] of this.chats) {
+                await this.nocobase.saveRecord('chat', id, { id, ...chat });
+            }
+
+            if (typeof showToast === 'function') {
+                showToast('synced all data to cloud');
+            }
+            return true;
+        } catch (e) {
+            console.error('[rp] force sync error:', e);
+            return false;
+        }
     }
 }
 
@@ -1668,6 +1989,11 @@ class RPUIController {
         const currentTemperature = this.rp.storage.getSetting('temperature', 0.8);
         const currentMaxTokens = this.rp.storage.getSetting('maxTokens', 2048);
 
+        // check nocobase status
+        const nocobaseConfigured = this.rp.storage.nocobase.isConfigured();
+        const nocobaseUrl = localStorage.getItem('llms_nocobase_url') || 'https://db.houseofmates.space';
+        const nocobaseKey = localStorage.getItem('llms_nocobase_key') || '';
+
         settings.innerHTML = `
             <div class="rp-settings-header">
                 <button class="rp-back-btn" id="rp-settings-back">←</button>
@@ -1675,9 +2001,33 @@ class RPUIController {
             </div>
             <div class="rp-settings-content">
                 <div class="rp-settings-section">
-                    <h3>api configuration</h3>
+                    <h3>cloud sync (nocobase)</h3>
+                    <div class="rp-sync-status ${nocobaseConfigured ? 'rp-sync-connected' : 'rp-sync-disconnected'}">
+                        <span class="rp-sync-indicator"></span>
+                        <span>${nocobaseConfigured ? 'connected to cloud' : 'not connected'}</span>
+                    </div>
                     <div class="rp-form-group">
-                        <label>nvidia nim api key(s)</label>
+                        <label>nocobase url</label>
+                        <input type="text" id="rp-nocobase-url" value="${this.escapeHtml(nocobaseUrl)}"
+                            placeholder="https://db.houseofmates.space">
+                        <small>your nocobase server url</small>
+                    </div>
+                    <div class="rp-form-group">
+                        <label>nocobase api key</label>
+                        <input type="password" id="rp-nocobase-key" value="${nocobaseKey}"
+                            placeholder="enter your nocobase api key">
+                        <small>characters and chats will sync automatically when configured</small>
+                    </div>
+                    <div class="rp-settings-actions">
+                        <button class="rp-btn" id="rp-sync-now">↻ sync now</button>
+                        <button class="rp-btn" id="rp-push-all">↑ push all to cloud</button>
+                    </div>
+                </div>
+
+                <div class="rp-settings-section">
+                    <h3>nvidia nim api</h3>
+                    <div class="rp-form-group">
+                        <label>api key(s)</label>
                         <input type="password" id="rp-nvidia-key" value="${keys.nvidia || ''}"
                             placeholder="enter your nvidia nim api key (comma-separated for multiple)">
                         <small>get your key at integrate.api.nvidia.com</small>
@@ -1736,11 +2086,39 @@ class RPUIController {
             const temperature = parseFloat(document.getElementById('rp-temperature')?.value) || 0.8;
             const maxTokens = parseInt(document.getElementById('rp-max-tokens')?.value) || 2048;
 
+            // save nocobase config (uses main app's storage keys)
+            const nocobaseUrl = document.getElementById('rp-nocobase-url')?.value.trim();
+            const nocobaseKey = document.getElementById('rp-nocobase-key')?.value.trim();
+
+            if (nocobaseUrl) {
+                localStorage.setItem('llms_nocobase_url', nocobaseUrl.replace(/\/+$/, ''));
+            }
+            if (nocobaseKey) {
+                localStorage.setItem('llms_nocobase_key', nocobaseKey);
+            }
+
             this.rp.saveApiKeys({ nvidia: nvidiaKey });
             this.rp.storage.setSetting('temperature', temperature);
             this.rp.storage.setSetting('maxTokens', maxTokens);
 
             showToast?.('settings saved');
+
+            // re-render to update sync status
+            this.renderSettings();
+        });
+
+        // sync now button - pull from cloud
+        document.getElementById('rp-sync-now')?.addEventListener('click', async () => {
+            showToast?.('syncing from cloud...');
+            await this.rp.storage.syncFromNocoBase();
+            this.renderSettings();
+            showToast?.('sync complete');
+        });
+
+        // push all to cloud button
+        document.getElementById('rp-push-all')?.addEventListener('click', async () => {
+            showToast?.('pushing to cloud...');
+            await this.rp.storage.forceSync();
         });
 
         document.getElementById('rp-add-persona')?.addEventListener('click', () => {
