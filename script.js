@@ -288,6 +288,7 @@ const MAX_CONTEXT_MESSAGES = 20;
 const MAX_STORED_CHAT_MESSAGES = 1000;
 
 let models = [
+    { id: 'rp', name: 'rp', type: 'rp', url: null, domain: 'roleplay', baseColor: '#e91e63', supportsChats: true, supportsImages: true },
     { id: 'lumo', name: 'lumo', type: 'webview', url: 'https://lumo.proton.me/', domain: 'proton.me', baseColor: '#ffffff' },
     { id: 'gemini', name: 'gemini', type: 'webview', url: 'https://gemini.google.com', domain: 'google.com', baseColor: '#006bcf', supportsChats: true },
     { id: 'chatgpt', name: 'chatgpt', type: 'webview', url: 'https://chatgpt.com/', domain: 'chatgpt.com', baseColor: '#00d6a1' },
@@ -1557,6 +1558,28 @@ async function handleModelSelection(btn) {
             chats = {};
             currentChatId = null;
         }
+    } else if (effectiveType === 'rp') {
+        // rp (roleplay) module
+        if (window.electronAPI) {
+            window.electronAPI.hideAllSites();
+        }
+        webviewContainer.style.display = 'none';
+        webviewContainer.classList.add('hidden');
+        apiChatContainer.style.display = 'none';
+        apiChatContainer.classList.add('hidden');
+        hideBrowserLink();
+
+        // show rp container
+        const rpContainer = document.getElementById('rp-container');
+        if (rpContainer) {
+            rpContainer.classList.remove('hidden');
+            // initialize rp ui if available
+            if (window.rpUI) {
+                window.rpUI.init();
+            }
+        }
+
+        currentApiMode = 'rp';
     }
 
     // copy prompt button removed
@@ -2032,6 +2055,13 @@ function generateUI() {
         }
 
         apiChatContainer.classList.add('hidden');
+
+        // hide rp container
+        const rpContainer = document.getElementById('rp-container');
+        if (rpContainer) {
+            rpContainer.classList.add('hidden');
+        }
+
         chatHistory = [];
         currentApiMode = null;
         if (currentModelTitle) { currentModelTitle.textContent = ''; }

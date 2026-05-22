@@ -1,0 +1,919 @@
+/* rp-styles.css - roleplay module styles */
+
+/* =====================================================
+   rp container
+   ===================================================== */
+#rp-container {
+    position: absolute;
+    inset: 0;
+    background: #050505;
+    display: flex;
+    flex-direction: column;
+    z-index: 15;
+}
+
+#rp-container.hidden {
+    display: none;
+}
+
+/* =====================================================
+   rp header
+   ===================================================== */
+.rp-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+    border-bottom: 1px solid #222;
+    background: #0a0a0a;
+    flex-shrink: 0;
+}
+
+.rp-header h1 {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: #f5af12;
+    margin: 0;
+    flex: 1;
+}
+
+.rp-header-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.rp-back-btn {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 1.2rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.rp-back-btn:hover {
+    background: rgba(245, 175, 18, 0.1);
+    border-color: #f5af12;
+}
+
+/* =====================================================
+   rp views
+   ===================================================== */
+.rp-view {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+}
+
+.rp-view.hidden {
+    display: none;
+}
+
+/* =====================================================
+   character grid
+   ===================================================== */
+.rp-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 1rem;
+}
+
+@media (max-width: 767px) {
+    .rp-grid {
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.5rem;
+    }
+}
+
+.rp-character-card {
+    position: relative;
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 12px;
+    padding: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+}
+
+.rp-character-card:hover {
+    background: #1a1a1a;
+    border-color: #f5af12;
+    transform: translateY(-2px);
+}
+
+.rp-character-avatar {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 0.75rem;
+    border-radius: 50%;
+    background-color: #222;
+    background-size: cover;
+    background-position: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid #333;
+}
+
+@media (max-width: 767px) {
+    .rp-character-avatar {
+        width: 60px;
+        height: 60px;
+    }
+}
+
+.rp-avatar-placeholder {
+    font-size: 2rem;
+}
+
+.rp-character-name {
+    font-size: 0.9rem;
+    font-weight: bold;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.rp-character-fav {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    color: #f5af12;
+    font-size: 1rem;
+}
+
+.rp-character-actions {
+    position: absolute;
+    bottom: 0.5rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    display: flex;
+    justify-content: center;
+    gap: 0.25rem;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.rp-character-card:hover .rp-character-actions {
+    opacity: 1;
+}
+
+.rp-action-btn {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.rp-action-btn:hover {
+    background: rgba(245, 175, 18, 0.2);
+    border-color: #f5af12;
+}
+
+.rp-action-delete:hover {
+    background: rgba(255, 50, 50, 0.2);
+    border-color: #f55;
+}
+
+/* =====================================================
+   empty state
+   ===================================================== */
+.rp-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem;
+    text-align: center;
+    min-height: 300px;
+}
+
+.rp-empty-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+}
+
+.rp-empty-title {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: #fff;
+    margin-bottom: 0.5rem;
+}
+
+.rp-empty-desc {
+    color: #888;
+    margin-bottom: 1.5rem;
+}
+
+/* =====================================================
+   buttons
+   ===================================================== */
+.rp-btn {
+    padding: 0.6rem 1.2rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: inherit;
+}
+
+.rp-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: #444;
+}
+
+.rp-btn-primary {
+    background: #f5af12;
+    border-color: #f5af12;
+    color: #050505;
+    font-weight: bold;
+}
+
+.rp-btn-primary:hover {
+    background: #ffc107;
+    border-color: #ffc107;
+}
+
+.rp-btn-danger {
+    border-color: #f55;
+    color: #f55;
+}
+
+.rp-btn-danger:hover {
+    background: rgba(255, 50, 50, 0.1);
+}
+
+/* =====================================================
+   chat view
+   ===================================================== */
+#rp-chat-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 0;
+}
+
+#rp-chat-view.hidden {
+    display: none;
+}
+
+.rp-chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem;
+    border-bottom: 1px solid #222;
+    background: #0a0a0a;
+    flex-shrink: 0;
+}
+
+.rp-chat-header-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.rp-chat-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background-color: #222;
+    background-size: cover;
+    background-position: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+}
+
+.rp-chat-header-text {
+    display: flex;
+    flex-direction: column;
+}
+
+.rp-chat-character-name {
+    font-weight: bold;
+    color: #fff;
+}
+
+.rp-chat-persona-name {
+    font-size: 0.75rem;
+    color: #888;
+}
+
+.rp-chat-header-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+/* =====================================================
+   chat messages
+   ===================================================== */
+#rp-chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    padding-bottom: 100px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.rp-message {
+    display: flex;
+    gap: 0.75rem;
+    max-width: 85%;
+}
+
+.rp-message-user {
+    flex-direction: row-reverse;
+    align-self: flex-end;
+}
+
+.rp-message-assistant {
+    align-self: flex-start;
+}
+
+.rp-message-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background-color: #222;
+    background-size: cover;
+    background-position: center;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+}
+
+.rp-message-content {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 12px;
+    padding: 0.75rem 1rem;
+    min-width: 60px;
+}
+
+.rp-message-user .rp-message-content {
+    background: rgba(37, 161, 218, 0.1);
+    border-color: rgba(37, 161, 218, 0.3);
+}
+
+.rp-message-assistant .rp-message-content {
+    background: rgba(245, 175, 18, 0.05);
+    border-color: rgba(245, 175, 18, 0.2);
+}
+
+.rp-message-name {
+    font-size: 0.75rem;
+    font-weight: bold;
+    color: #888;
+    margin-bottom: 0.25rem;
+}
+
+.rp-message-text {
+    color: #e0e0e0;
+    line-height: 1.5;
+    word-wrap: break-word;
+}
+
+.rp-message-text em {
+    font-style: italic;
+    color: #25a1da;
+}
+
+.rp-message-text strong {
+    font-weight: bold;
+}
+
+.rp-message-text code {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.1rem 0.3rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+.rp-message-greeting .rp-message-content {
+    background: linear-gradient(135deg, rgba(245, 175, 18, 0.1), rgba(37, 161, 218, 0.1));
+    border-color: rgba(245, 175, 18, 0.3);
+}
+
+.rp-message-streaming .rp-message-content::after {
+    content: '▋';
+    animation: blink 1s infinite;
+}
+
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+/* message images */
+.rp-message-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.rp-message-image {
+    max-width: 200px;
+    max-height: 200px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.rp-message-image:hover {
+    transform: scale(1.05);
+}
+
+/* =====================================================
+   chat input
+   ===================================================== */
+.rp-chat-input-container {
+    padding: 1rem;
+    border-top: 1px solid #222;
+    background: #0a0a0a;
+    flex-shrink: 0;
+}
+
+.rp-chat-input-wrapper {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-end;
+}
+
+#rp-chat-input {
+    flex: 1;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 0.75rem 1rem;
+    color: #fff;
+    font-size: 1rem;
+    font-family: inherit;
+    resize: none;
+    min-height: 44px;
+    max-height: 150px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+#rp-chat-input:focus {
+    border-color: #25a1da;
+}
+
+#rp-chat-input::placeholder {
+    color: #666;
+}
+
+.rp-chat-input-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+#rp-attach-btn,
+#rp-send-btn {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    font-size: 1.2rem;
+    transition: all 0.2s;
+}
+
+#rp-attach-btn {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+#rp-attach-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+#rp-send-btn {
+    background: #25a1da;
+    color: #fff;
+}
+
+#rp-send-btn:hover {
+    background: #3ab5ee;
+    transform: scale(1.05);
+}
+
+/* =====================================================
+   image modal
+   ===================================================== */
+.rp-image-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.rp-image-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.9);
+}
+
+.rp-image-modal-img {
+    position: relative;
+    max-width: 90vw;
+    max-height: 90vh;
+    border-radius: 8px;
+}
+
+/* =====================================================
+   character/persona editor
+   ===================================================== */
+#rp-character-editor,
+#rp-persona-editor {
+    padding: 0;
+}
+
+#rp-character-editor.hidden,
+#rp-persona-editor.hidden {
+    display: none;
+}
+
+.rp-editor-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+    border-bottom: 1px solid #222;
+    background: #0a0a0a;
+}
+
+.rp-editor-header h2 {
+    font-size: 1.25rem;
+    font-weight: bold;
+    color: #fff;
+    margin: 0;
+}
+
+.rp-editor-content {
+    padding: 1rem;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.rp-form-group {
+    margin-bottom: 1.25rem;
+}
+
+.rp-form-group label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: bold;
+    color: #888;
+    margin-bottom: 0.5rem;
+}
+
+.rp-form-group input[type="text"],
+.rp-form-group input[type="password"],
+.rp-form-group input[type="number"],
+.rp-form-group textarea {
+    width: 100%;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 0.75rem;
+    color: #fff;
+    font-size: 1rem;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.rp-form-group input:focus,
+.rp-form-group textarea:focus {
+    border-color: #25a1da;
+}
+
+.rp-form-group input::placeholder,
+.rp-form-group textarea::placeholder {
+    color: #555;
+}
+
+.rp-form-group textarea {
+    resize: vertical;
+    min-height: 80px;
+}
+
+.rp-form-group small {
+    display: block;
+    font-size: 0.75rem;
+    color: #666;
+    margin-top: 0.25rem;
+}
+
+.rp-form-group input[type="range"] {
+    width: 100%;
+    -webkit-appearance: none;
+    background: transparent;
+}
+
+.rp-form-group input[type="range"]::-webkit-slider-track {
+    height: 6px;
+    background: #333;
+    border-radius: 3px;
+}
+
+.rp-form-group input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    background: #f5af12;
+    border-radius: 50%;
+    cursor: pointer;
+    margin-top: -6px;
+}
+
+.rp-form-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: flex-end;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid #222;
+}
+
+/* avatar upload */
+.rp-avatar-upload {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.rp-avatar-preview {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background-color: #222;
+    background-size: cover;
+    background-position: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    color: #666;
+    border: 2px dashed #333;
+}
+
+/* =====================================================
+   settings view
+   ===================================================== */
+#rp-settings-view {
+    padding: 0;
+}
+
+#rp-settings-view.hidden {
+    display: none;
+}
+
+.rp-settings-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+    border-bottom: 1px solid #222;
+    background: #0a0a0a;
+}
+
+.rp-settings-header h2 {
+    font-size: 1.25rem;
+    font-weight: bold;
+    color: #fff;
+    margin: 0;
+}
+
+.rp-settings-content {
+    padding: 1rem;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.rp-settings-section {
+    margin-bottom: 2rem;
+}
+
+.rp-settings-section h3 {
+    font-size: 1rem;
+    font-weight: bold;
+    color: #f5af12;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #222;
+}
+
+.rp-settings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+/* =====================================================
+   persona list
+   ===================================================== */
+#rp-persona-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.rp-persona-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    transition: all 0.2s;
+}
+
+.rp-persona-item:hover {
+    border-color: #333;
+}
+
+.rp-persona-active {
+    border-color: #25a1da;
+    background: rgba(37, 161, 218, 0.05);
+}
+
+.rp-persona-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background-color: #222;
+    background-size: cover;
+    background-position: center;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+}
+
+.rp-persona-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.rp-persona-name {
+    font-weight: bold;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.rp-persona-badge {
+    font-size: 0.7rem;
+    color: #888;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+}
+
+.rp-persona-actions {
+    display: flex;
+    gap: 0.25rem;
+}
+
+/* =====================================================
+   quick replies
+   ===================================================== */
+.rp-quick-replies {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-top: 1px solid #222;
+}
+
+.rp-quick-reply {
+    padding: 0.4rem 0.8rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid #333;
+    border-radius: 16px;
+    color: #888;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.rp-quick-reply:hover {
+    background: rgba(245, 175, 18, 0.1);
+    border-color: #f5af12;
+    color: #f5af12;
+}
+
+/* =====================================================
+   mobile adjustments
+   ===================================================== */
+@media (max-width: 767px) {
+    .rp-header {
+        padding: 0.75rem;
+    }
+
+    .rp-header h1 {
+        font-size: 1.25rem;
+    }
+
+    .rp-view {
+        padding: 0.75rem;
+    }
+
+    .rp-character-name {
+        font-size: 0.8rem;
+    }
+
+    .rp-message {
+        max-width: 90%;
+    }
+
+    .rp-chat-input-container {
+        padding: 0.75rem;
+    }
+
+    .rp-editor-content,
+    .rp-settings-content {
+        padding: 0.75rem;
+    }
+
+    .rp-form-actions {
+        flex-direction: column;
+    }
+
+    .rp-form-actions .rp-btn {
+        width: 100%;
+    }
+}
+
+/* =====================================================
+   scrollbar styling
+   ===================================================== */
+#rp-chat-messages::-webkit-scrollbar,
+#rp-character-grid::-webkit-scrollbar,
+#rp-settings-view::-webkit-scrollbar {
+    width: 6px;
+}
+
+#rp-chat-messages::-webkit-scrollbar-track,
+#rp-character-grid::-webkit-scrollbar-track,
+#rp-settings-view::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#rp-chat-messages::-webkit-scrollbar-thumb,
+#rp-character-grid::-webkit-scrollbar-thumb,
+#rp-settings-view::-webkit-scrollbar-thumb {
+    background: rgba(245, 175, 18, 0.3);
+    border-radius: 3px;
+}
+
+#rp-chat-messages::-webkit-scrollbar-thumb:hover,
+#rp-character-grid::-webkit-scrollbar-thumb:hover,
+#rp-settings-view::-webkit-scrollbar-thumb:hover {
+    background: rgba(245, 175, 18, 0.5);
+}
+
+/* =====================================================
+   utilities
+   ===================================================== */
+.hidden {
+    display: none !important;
+}
