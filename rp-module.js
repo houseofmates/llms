@@ -282,7 +282,9 @@ class RPNocoBaseSync {
         this.isSyncing = false;
         this.lastSyncTime = 0;
         this.syncDebounceMs = 1000;
-        this.pendingSyncTimeout = null;
+        this.pendingSyncTimeouts = new Map(); // per-record timeouts keyed by composite key
+        this.pendingPayloads = new Map(); // per-record payloads
+        this.pendingResolvers = new Map(); // per-record promise resolvers
     }
 
     // get nocobase config from main app (reuse existing config)
@@ -390,28 +392,45 @@ class RPNocoBaseSync {
             return false;
         }
 
-        // debounce saves
-        if (this.pendingSyncTimeout) {
-            clearTimeout(this.pendingSyncTimeout);
+        // use composite key to track per-record debouncing
+        const compositeKey = `${dataType}:${dataId}`;
+
+        // clear existing timeout for this specific record
+        if (this.pendingSyncTimeouts.has(compositeKey)) {
+            clearTimeout(this.pendingSyncTimeouts.get(compositeKey));
         }
 
+        // store the latest payload for this record
+        this.pendingPayloads.set(compositeKey, { dataType, dataId, data });
+
         return new Promise((resolve) => {
-            this.pendingSyncTimeout = setTimeout(async () => {
+            // store resolver for this record
+            this.pendingResolvers.set(compositeKey, resolve);
+
+            // set new timeout for this specific record
+            const timeout = setTimeout(async () => {
                 try {
                     await this.ensureCollection();
 
-                    // check if record exists
+                    // get the latest payload for this record
+                    const payload = this.pendingPayloads.get(compositeKey);
+                    if (!payload) {
+                        resolve(false);
+                        return;
+                    }
+
+                    // check if record exists using composite key (both dataType and dataId)
                     const checkRes = await fetch(
-                        `${url}/api/${this.collectionName}:list?filter[dataId]=${encodeURIComponent(dataId)}`,
+                        `${url}/api/${this.collectionName}:list?filter[dataType]=${encodeURIComponent(payload.dataType)}&filter[dataId]=${encodeURIComponent(payload.dataId)}`,
                         { headers: { Authorization: `Bearer ${apiKey}` } }
                     );
                     const checkData = await checkRes.json();
-                    const existing = (checkData.data || []).find(r => r.dataId === dataId);
+                    const existing = (checkData.data || []).find(r => r.dataId === payload.dataId && r.dataType === payload.dataType);
 
-                    const payload = {
-                        dataId,
-                        dataType,
-                        data: JSON.stringify(data)
+                    const requestPayload = {
+                        dataId: payload.dataId,
+                        dataType: payload.dataType,
+                        data: JSON.stringify(payload.data)
                     };
 
                     if (existing) {
@@ -422,7 +441,7 @@ class RPNocoBaseSync {
                                 Authorization: `Bearer ${apiKey}`,
                                 'Content-Type': 'application/json'
                             },
-                            body: JSON.stringify(payload)
+                            body: JSON.stringify(requestPayload)
                         });
                     } else {
                         // create
@@ -432,32 +451,53 @@ class RPNocoBaseSync {
                                 Authorization: `Bearer ${apiKey}`,
                                 'Content-Type': 'application/json'
                             },
-                            body: JSON.stringify(payload)
+                            body: JSON.stringify(requestPayload)
                         });
                     }
 
-                    console.log(`[rp] saved ${dataType}/${dataId} to nocobase`);
-                    resolve(true);
+                    console.log(`[rp] saved ${payload.dataType}/${payload.dataId} to nocobase`);
+
+                    // resolve the specific resolver for this record
+                    const resolver = this.pendingResolvers.get(compositeKey);
+                    if (resolver) resolver(true);
+
+                    // clean up
+                    this.pendingSyncTimeouts.delete(compositeKey);
+                    this.pendingPayloads.delete(compositeKey);
+                    this.pendingResolvers.delete(compositeKey);
                 } catch (e) {
                     console.error('[rp] nocobase save error:', e);
-                    resolve(false);
+
+                    // resolve with false on error
+                    const resolver = this.pendingResolvers.get(compositeKey);
+                    if (resolver) resolver(false);
+
+                    // clean up
+                    this.pendingSyncTimeouts.delete(compositeKey);
+                    this.pendingPayloads.delete(compositeKey);
+                    this.pendingResolvers.delete(compositeKey);
                 }
             }, this.syncDebounceMs);
+
+            this.pendingSyncTimeouts.set(compositeKey, timeout);
         });
     }
 
-    async deleteRecord(dataId) {
+    async deleteRecord(dataId, dataType = null) {
         const { url, apiKey } = this.getConfig();
         if (!url || !apiKey) return false;
 
         try {
-            // find record
-            const checkRes = await fetch(
-                `${url}/api/${this.collectionName}:list?filter[dataId]=${encodeURIComponent(dataId)}`,
-                { headers: { Authorization: `Bearer ${apiKey}` } }
-            );
+            // find record - if dataType not provided, find by dataId only (for backwards compat)
+            let checkUrl = `${url}/api/${this.collectionName}:list?filter[dataId]=${encodeURIComponent(dataId)}`;
+            if (dataType) {
+                checkUrl += `&filter[dataType]=${encodeURIComponent(dataType)}`;
+            }
+            const checkRes = await fetch(checkUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
             const checkData = await checkRes.json();
-            const existing = (checkData.data || []).find(r => r.dataId === dataId);
+            const existing = dataType
+                ? (checkData.data || []).find(r => r.dataId === dataId && r.dataType === dataType)
+                : (checkData.data || []).find(r => r.dataId === dataId);
 
             if (existing) {
                 await fetch(`${url}/api/${this.collectionName}:destroy?filterByTk=${existing.id}`, {
@@ -593,7 +633,7 @@ class RPStorage {
             if (this.personas.size === 0) {
                 const defaultPersona = new Persona({ name: 'you', isDefault: true });
                 this.personas.set(defaultPersona.id, defaultPersona);
-                this.savePersonas();
+                this.savePersonasLocal();
             }
         } catch (e) {
             console.warn('[rp] failed to load personas locally:', e);
@@ -1363,9 +1403,15 @@ class RPUIController {
         this.rp = rpModule;
         this.elements = {};
         this.isRendering = false;
+        this._rpInitialized = false;
     }
 
     init() {
+        // return early if already initialized to prevent event listener stacking
+        if (this._rpInitialized) {
+            return;
+        }
+
         // check if rp container exists
         this.elements.container = document.getElementById('rp-container');
         if (!this.elements.container) {
@@ -1376,6 +1422,9 @@ class RPUIController {
         this.bindElements();
         this.bindEvents();
         this.renderCharacterGrid();
+
+        // mark as initialized
+        this._rpInitialized = true;
     }
 
     bindElements() {
@@ -1492,7 +1541,9 @@ class RPUIController {
             return;
         }
 
-        let html = '<div class="rp-grid">';
+        // create grid container
+        const grid = document.createElement('div');
+        grid.className = 'rp-grid';
 
         // sort: favorites first, then by updated date
         const sortedCharacters = [...characters].sort((a, b) => {
@@ -1502,26 +1553,71 @@ class RPUIController {
         });
 
         for (const char of sortedCharacters) {
-            html += `
-                <div class="rp-character-card" data-id="${char.id}">
-                    <div class="rp-character-avatar" style="background-image: url('${char.avatarUrl || ''}')">
-                        ${!char.avatarUrl ? '<span class="rp-avatar-placeholder">🎭</span>' : ''}
-                    </div>
-                    <div class="rp-character-name">${this.escapeHtml(char.name)}</div>
-                    ${char.isFavorite ? '<div class="rp-character-fav">★</div>' : ''}
-                    <div class="rp-character-actions">
-                        <button class="rp-action-btn" data-action="edit" title="edit">✏️</button>
-                        <button class="rp-action-btn" data-action="favorite" title="favorite">
-                            ${char.isFavorite ? '★' : '☆'}
-                        </button>
-                        <button class="rp-action-btn rp-action-delete" data-action="delete" title="delete">🗑️</button>
-                    </div>
-                </div>
-            `;
+            // create card using DOM APIs to avoid XSS
+            const card = document.createElement('div');
+            card.className = 'rp-character-card';
+            card.dataset.id = char.id;
+
+            // create avatar
+            const avatar = document.createElement('div');
+            avatar.className = 'rp-character-avatar';
+            if (char.avatarUrl) {
+                // sanitize URL by encoding it properly
+                const sanitizedUrl = char.avatarUrl.replace(/'/g, "\\'").replace(/"/g, '\\"');
+                avatar.style.backgroundImage = `url('${sanitizedUrl}')`;
+            } else {
+                const placeholder = document.createElement('span');
+                placeholder.className = 'rp-avatar-placeholder';
+                placeholder.textContent = '🎭';
+                avatar.appendChild(placeholder);
+            }
+            card.appendChild(avatar);
+
+            // create name
+            const nameDiv = document.createElement('div');
+            nameDiv.className = 'rp-character-name';
+            nameDiv.textContent = char.name;
+            card.appendChild(nameDiv);
+
+            // favorite indicator
+            if (char.isFavorite) {
+                const favDiv = document.createElement('div');
+                favDiv.className = 'rp-character-fav';
+                favDiv.textContent = '★';
+                card.appendChild(favDiv);
+            }
+
+            // actions
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'rp-character-actions';
+
+            const editBtn = document.createElement('button');
+            editBtn.className = 'rp-action-btn';
+            editBtn.dataset.action = 'edit';
+            editBtn.title = 'edit';
+            editBtn.textContent = '✏️';
+            actionsDiv.appendChild(editBtn);
+
+            const favBtn = document.createElement('button');
+            favBtn.className = 'rp-action-btn';
+            favBtn.dataset.action = 'favorite';
+            favBtn.title = 'favorite';
+            favBtn.textContent = char.isFavorite ? '★' : '☆';
+            actionsDiv.appendChild(favBtn);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'rp-action-btn rp-action-delete';
+            deleteBtn.dataset.action = 'delete';
+            deleteBtn.title = 'delete';
+            deleteBtn.textContent = '🗑️';
+            actionsDiv.appendChild(deleteBtn);
+
+            card.appendChild(actionsDiv);
+            grid.appendChild(card);
         }
 
-        html += '</div>';
-        this.elements.characterGrid.innerHTML = html;
+        this.elements.characterGrid.innerHTML = '';
+        this.elements.characterGrid.appendChild(grid);
 
         // bind events
         this.elements.characterGrid.querySelectorAll('.rp-character-card').forEach(card => {
@@ -1666,21 +1762,31 @@ class RPUIController {
     }
 
     renderMessageImages(images) {
-        let html = '<div class="rp-message-images">';
+        const container = document.createElement('div');
+        container.className = 'rp-message-images';
         for (const img of images) {
-            html += `<img src="${img}" class="rp-message-image" onclick="rpUI.showImageModal('${img}')">`;
+            const imgEl = document.createElement('img');
+            imgEl.className = 'rp-message-image';
+            imgEl.src = img; // direct assignment is safe
+            imgEl.addEventListener('click', () => this.showImageModal(img));
+            container.appendChild(imgEl);
         }
-        html += '</div>';
-        return html;
+        return container.outerHTML;
     }
 
     showImageModal(src) {
         const modal = document.createElement('div');
         modal.className = 'rp-image-modal';
-        modal.innerHTML = `
-            <div class="rp-image-modal-backdrop"></div>
-            <img src="${src}" class="rp-image-modal-img">
-        `;
+
+        const backdrop = document.createElement('div');
+        backdrop.className = 'rp-image-modal-backdrop';
+        modal.appendChild(backdrop);
+
+        const img = document.createElement('img');
+        img.className = 'rp-image-modal-img';
+        img.src = src; // direct assignment is safe
+        modal.appendChild(img);
+
         modal.addEventListener('click', () => modal.remove());
         document.body.appendChild(modal);
     }
@@ -1802,8 +1908,10 @@ class RPUIController {
             return;
         }
 
-        if (file.size > 10 * 1024 * 1024) {
-            showToast?.('image must be under 10mb');
+        // enforce 500KB file size limit to prevent localStorage quota errors
+        const maxSize = 500 * 1024; // 500KB
+        if (file.size > maxSize) {
+            showToast?.('image must be under 500kb to prevent storage errors');
             return;
         }
 
@@ -1936,6 +2044,14 @@ class RPUIController {
         document.getElementById('rp-avatar-input')?.addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
+
+            // enforce 500KB file size limit to prevent localStorage quota errors
+            const maxSize = 500 * 1024; // 500KB
+            if (file.size > maxSize) {
+                showToast?.('avatar must be under 500kb to prevent storage errors');
+                e.target.value = '';
+                return;
+            }
 
             try {
                 avatarUrl = await this.rp.fileToDataUrl(file);

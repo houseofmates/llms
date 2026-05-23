@@ -395,7 +395,7 @@
 .rp-message-text {
     color: #e0e0e0;
     line-height: 1.5;
-    word-wrap: break-word;
+    overflow-wrap: break-word;
 }
 
 .rp-message-text em {
@@ -770,7 +770,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: currentColor;
+    background: currentcolor;
 }
 
 /* =====================================================
