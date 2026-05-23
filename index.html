@@ -30,6 +30,8 @@
     </script>
     <!-- local stylesheet -->
     <link rel="stylesheet" href="styles.css">
+    <!-- rp module styles -->
+    <link rel="stylesheet" href="rp-styles.css">
     <!-- sortable.js for drag and drop -->
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <!-- tom-select for searchable dropdowns -->
@@ -180,6 +182,61 @@
 
             <!-- site container (iframe fallback for web/android — electron uses BrowserView via IPC) -->
             <iframe id="webview-container" class="w-full h-full border-none hidden" src="about:blank"></iframe>
+
+            <!-- rp (roleplay) container -->
+            <div id="rp-container" class="hidden">
+                <!-- rp header -->
+                <div class="rp-header">
+                    <button class="rp-back-btn" id="rp-back-btn" aria-label="Back">←</button>
+                    <h1>rp</h1>
+                    <div class="rp-header-actions">
+                        <button class="rp-btn" id="rp-import-btn" title="import character" aria-label="Import character">📥</button>
+                        <input type="file" id="rp-import-input" accept=".png,.json" class="hidden">
+                        <button class="rp-btn" id="rp-add-character-btn" title="new character" aria-label="Add character">+</button>
+                        <button class="rp-btn" id="rp-settings-btn" title="settings" aria-label="Settings">⚙️</button>
+                    </div>
+                </div>
+
+                <!-- character grid view -->
+                <div id="rp-character-grid" class="rp-view">
+                    <!-- populated dynamically -->
+                </div>
+
+                <!-- chat view -->
+                <div id="rp-chat-view" class="rp-view hidden">
+                    <div id="rp-character-info" class="rp-chat-header">
+                        <!-- populated dynamically -->
+                    </div>
+                    <div id="rp-chat-messages">
+                        <!-- messages rendered here -->
+                    </div>
+                    <div class="rp-chat-input-container">
+                        <div class="rp-chat-input-wrapper">
+                            <textarea id="rp-chat-input" placeholder="type your message..." rows="1"></textarea>
+                            <div class="rp-chat-input-actions">
+                                <button id="rp-attach-btn" title="attach image" aria-label="Attach image">📎</button>
+                                <input type="file" id="rp-attach-input" accept="image/*" class="hidden">
+                                <button id="rp-send-btn" title="send" aria-label="Send">➤</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- settings view -->
+                <div id="rp-settings-view" class="rp-view hidden">
+                    <!-- populated dynamically -->
+                </div>
+
+                <!-- character editor -->
+                <div id="rp-character-editor" class="rp-view hidden">
+                    <!-- populated dynamically -->
+                </div>
+
+                <!-- persona editor -->
+                <div id="rp-persona-editor" class="rp-view hidden">
+                    <!-- populated dynamically -->
+                </div>
+            </div>
 
             <!-- api chat container -->
 <div id="api-chat-container"
@@ -342,6 +399,7 @@
     </div>
 
     <script src="llama-offline.js"></script>
+    <script src="rp-module.js"></script>
     <script src="script.js"></script>
 </body>
 
