@@ -1638,6 +1638,33 @@
 .rp-memory-source-auto { color: #25a1da; }
 .rp-memory-source-manual { color: #f5af12; }
 
+.rp-memory-panel-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.rp-memory-section-title {
+    color: #888;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0.5rem 0 0.25rem;
+}
+
+.rp-cache-badge {
+    background: rgba(37, 161, 218, 0.18);
+    color: #25a1da;
+    font-size: 0.65rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 10px;
+    margin-left: 0.4rem;
+    font-weight: normal;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
 /* =====================================================
    macros panel
    ===================================================== */

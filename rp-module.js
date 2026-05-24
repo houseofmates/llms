@@ -17,11 +17,13 @@ const RP_STORAGE_KEYS = {
     GROUP_CHATS: 'llms_rp_group_chats',
     QUICK_REPLY_SETS: 'llms_rp_quick_reply_sets',
     EXTENSIONS: 'llms_rp_extensions',
-    MIGRATION_VERSION: 'llms_rp_migration_version'
+    MIGRATION_VERSION: 'llms_rp_migration_version',
+    MEMORIES: 'llms_rp_memories',
+    LOREBOOK_META: 'llms_rp_lorebook_meta'
 };
 
 // current data migration version. bump when models change.
-const RP_MIGRATION_VERSION = 2;
+const RP_MIGRATION_VERSION = 3;
 
 // =====================================================
 // nvidia nim api configuration
@@ -794,6 +796,8 @@ class RPStorage {
         this.groupChats = new Map();
         this.quickReplySets = new Map();
         this.extensionsState = {}; // { extensionId: { enabled, settings } }
+        this.memories = new Map(); // scopeKey -> MemoryEntry[]
+        this.lorebookMeta = new Map(); // lorebookId -> { name, type, scopeId, timeframe, realityType }
         this.nocobase = new RPNocoBaseSync();
         this.isLoaded = false;
         this.loadAll();
@@ -810,6 +814,8 @@ class RPStorage {
         this.loadGroupChatsLocal();
         this.loadQuickReplySetsLocal();
         this.loadExtensionsLocal();
+        this.loadMemoriesLocal();
+        this.loadLorebookMetaLocal();
 
         // run any pending data migrations
         try {
@@ -874,6 +880,39 @@ class RPStorage {
             }
         }
         this.saveChatsLocal();
+
+        // v3: ensure a default world lorebook exists and tag existing character
+        // lorebooks with a meta record so they show up in the typed lorebook ui.
+        if (currentVersion < 3) {
+            if (!this.getWorldLorebookId()) {
+                const worldId = 'world_' + Date.now().toString(36);
+                this.lorebooks.set(worldId, []);
+                this.saveLorebooksLocal();
+                this.saveLorebookMeta(worldId, {
+                    name: 'world',
+                    type: 'world',
+                    scopeId: null,
+                    timeframe: { start: '', end: '', description: '' },
+                    realityType: 'fictional'
+                });
+            }
+            // backfill character lorebooks with default meta
+            for (const [lid] of this.lorebooks) {
+                if (this.getLorebookMeta(lid)) continue;
+                // try to find a character that points at it
+                let scopeId = null;
+                for (const [cid, char] of this.characters) {
+                    if (char.lorebookId === lid) { scopeId = cid; break; }
+                }
+                this.saveLorebookMeta(lid, {
+                    name: 'lorebook',
+                    type: scopeId ? 'character' : 'character',
+                    scopeId,
+                    timeframe: { start: '', end: '', description: '' },
+                    realityType: 'fictional'
+                });
+            }
+        }
 
         try {
             localStorage.setItem(RP_STORAGE_KEYS.MIGRATION_VERSION, String(RP_MIGRATION_VERSION));
@@ -1118,6 +1157,46 @@ class RPStorage {
         }
     }
 
+    loadMemoriesLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.MEMORIES) || '{}');
+            this.memories = new Map(Object.entries(data).map(([scope, arr]) => [
+                scope,
+                (arr || []).map(m => new MemoryEntry(m))
+            ]));
+        } catch (e) {
+            console.warn('[rp] failed to load memories locally:', e);
+            this.memories = new Map();
+        }
+    }
+
+    saveMemoriesLocal() {
+        try {
+            const obj = {};
+            for (const [k, v] of this.memories) obj[k] = v;
+            localStorage.setItem(RP_STORAGE_KEYS.MEMORIES, JSON.stringify(obj));
+        } catch (e) {
+            console.error('[rp] failed to save memories locally:', e);
+        }
+    }
+
+    loadLorebookMetaLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.LOREBOOK_META) || '{}');
+            this.lorebookMeta = new Map(Object.entries(data));
+        } catch (e) {
+            this.lorebookMeta = new Map();
+        }
+    }
+
+    saveLorebookMetaLocal() {
+        try {
+            localStorage.setItem(RP_STORAGE_KEYS.LOREBOOK_META, JSON.stringify(Object.fromEntries(this.lorebookMeta)));
+        } catch (e) {
+            console.error('[rp] failed to save lorebook meta locally:', e);
+        }
+    }
+
     // ---- public api (saves to both local and cloud) ----
 
     getCharacter(id) {
@@ -1346,6 +1425,111 @@ class RPStorage {
         return Object.assign({}, this.extensionsState);
     }
 
+    // ---- memories ----
+    getMemories(scopeKey = 'global') {
+        return this.memories.get(scopeKey) || [];
+    }
+
+    // returns all memories that may be relevant for the given character + persona.
+    // gathers from character-scoped, persona-scoped, and global scopes.
+    getRelevantMemories({ characterId = null, personaId = null } = {}) {
+        const out = [];
+        const seen = new Set();
+        const add = (list) => {
+            for (const m of (list || [])) {
+                if (seen.has(m.id)) continue;
+                seen.add(m.id);
+                out.push(m);
+            }
+        };
+        if (characterId) add(this.getMemories('character:' + characterId));
+        if (personaId) add(this.getMemories('persona:' + personaId));
+        add(this.getMemories('global'));
+        return out;
+    }
+
+    addMemory(entry, scopeKey = 'global') {
+        if (!(entry instanceof MemoryEntry)) entry = new MemoryEntry(entry);
+        entry.scopeKey = scopeKey;
+        const list = this.memories.get(scopeKey) || [];
+        // dedupe: if a similar memory exists, bump lastRelevantAt + nudge confidence.
+        const threshold = 0.78;
+        for (const existing of list) {
+            if (MemorySimilarity.score(existing.content, entry.content) >= threshold) {
+                existing.lastRelevantAt = new Date().toISOString();
+                existing.confidence = Math.min(1, ((existing.confidence || 0.5) + entry.confidence) / 2 + 0.05);
+                this.memories.set(scopeKey, list);
+                this.saveMemoriesLocal();
+                return existing;
+            }
+        }
+        list.push(entry);
+        this.memories.set(scopeKey, list);
+        this.saveMemoriesLocal();
+        return entry;
+    }
+
+    updateMemory(id, patch, scopeKey = 'global') {
+        const list = this.memories.get(scopeKey) || [];
+        const idx = list.findIndex(m => m.id === id);
+        if (idx === -1) return null;
+        Object.assign(list[idx], patch);
+        if (typeof list[idx].content === 'string') list[idx].content = list[idx].content.toLowerCase();
+        this.memories.set(scopeKey, list);
+        this.saveMemoriesLocal();
+        return list[idx];
+    }
+
+    deleteMemory(id, scopeKey = 'global') {
+        const list = this.memories.get(scopeKey) || [];
+        const next = list.filter(m => m.id !== id);
+        this.memories.set(scopeKey, next);
+        this.saveMemoriesLocal();
+    }
+
+    markMemoryRelevant(id, scopeKey) {
+        return this.updateMemory(id, { lastRelevantAt: new Date().toISOString() }, scopeKey);
+    }
+
+    // ---- lorebook metadata (type / timeframe / realityType) ----
+    getLorebookMeta(id) {
+        return this.lorebookMeta.get(id) || null;
+    }
+
+    getAllLorebookMeta() {
+        return Array.from(this.lorebookMeta.entries()).map(([id, meta]) => ({ id, ...meta }));
+    }
+
+    saveLorebookMeta(id, meta) {
+        this.lorebookMeta.set(id, Object.assign({
+            name: '', type: 'character', scopeId: null,
+            timeframe: { start: '', end: '', description: '' },
+            realityType: 'fictional'
+        }, meta || {}));
+        this.saveLorebookMetaLocal();
+    }
+
+    deleteLorebookMeta(id) {
+        this.lorebookMeta.delete(id);
+        this.saveLorebookMetaLocal();
+    }
+
+    // user lorebook for a given persona (if any)
+    getUserLorebookIdForPersona(personaId) {
+        for (const [id, meta] of this.lorebookMeta) {
+            if (meta.type === 'user' && meta.scopeId === personaId) return id;
+        }
+        return null;
+    }
+
+    // single global world lorebook (returns the first one tagged world)
+    getWorldLorebookId() {
+        for (const [id, meta] of this.lorebookMeta) {
+            if (meta.type === 'world') return id;
+        }
+        return null;
+    }
+
     // force sync to cloud
     async forceSync() {
         if (!this.nocobase.isConfigured()) {
@@ -1517,14 +1701,25 @@ class RPModule {
         this.storage = new RPStorage();
         this.keyPool = new ApiKeyPool();
         this.apiClient = new NvidiaAPIClient(this.keyPool);
+        this.macros = new MacroEngine(this.storage);
+        this.semanticCache = new SemanticCache(this.keyPool, this.storage);
         this.currentCharacter = null;
         this.currentPersona = null;
+        this.currentGroup = null;
+        this.groupChatHistory = [];
         this.isActive = false;
         this.chatHistory = [];
         this.streamController = null;
 
         // load api keys from storage
         this.loadApiKeys();
+
+        // warm macro context (geolocation + weather are opt-in)
+        if (this.storage.getSetting('macroLocationAuto', false)) {
+            this.macros.refreshLocation().then(() => {
+                if (this.storage.getSetting('macroWeatherAuto', false)) this.macros.refreshWeather();
+            });
+        }
     }
 
     loadApiKeys() {
@@ -1658,31 +1853,86 @@ class RPModule {
             systemPrompt += `\n\n[example dialogue]\n${character.mesExample}`;
         }
 
-        // collect lorebook entries from multiple sources:
-        // 1) per-character embedded lorebook
-        // 2) shared lorebook referenced by character.lorebookId
+        // collect lorebook entries from multiple sources, in priority order:
+        //  character > user persona > world
+        // each entry is tagged with __source so duplicate keys can be resolved.
         const lorebookEntries = [];
+        const pushEntry = (e, source) => {
+            const inst = e instanceof LorebookEntry ? e : new LorebookEntry(e);
+            inst.__source = source;
+            lorebookEntries.push(inst);
+        };
+
         if (Array.isArray(character.embeddedLorebook) && character.embeddedLorebook.length > 0) {
-            for (const e of character.embeddedLorebook) {
-                lorebookEntries.push(e instanceof LorebookEntry ? e : new LorebookEntry(e));
-            }
+            for (const e of character.embeddedLorebook) pushEntry(e, 'character');
         }
         if (character.lorebookId) {
             const shared = this.storage.getLorebook(character.lorebookId) || [];
-            for (const e of shared) {
-                lorebookEntries.push(e instanceof LorebookEntry ? e : new LorebookEntry(e));
+            for (const e of shared) pushEntry(e, 'character');
+        }
+        // user persona lorebook
+        if (persona?.id) {
+            const userLid = this.storage.getUserLorebookIdForPersona?.(persona.id);
+            if (userLid) {
+                for (const e of (this.storage.getLorebook(userLid) || [])) pushEntry(e, 'user');
+            }
+        }
+        // world lorebook (single global)
+        const worldLid = this.storage.getWorldLorebookId?.();
+        if (worldLid) {
+            for (const e of (this.storage.getLorebook(worldLid) || [])) pushEntry(e, 'world');
+        }
+
+        // dedupe entries that share the same primary key set, keeping the
+        // highest-priority source (character > user > world). this is the
+        // simplest interpretation of the conflict-resolution rule in the spec.
+        const sourceWeight = { character: 3, user: 2, world: 1 };
+        const seenKey = new Map(); // joined-keys -> entry
+        const dedupedEntries = [];
+        for (const e of lorebookEntries) {
+            const k = (e.keys || []).slice().sort().join('||').toLowerCase();
+            if (!k) { dedupedEntries.push(e); continue; }
+            const prev = seenKey.get(k);
+            if (!prev) { seenKey.set(k, e); dedupedEntries.push(e); continue; }
+            // resolve conflict
+            if ((sourceWeight[e.__source] || 0) > (sourceWeight[prev.__source] || 0)) {
+                const idx = dedupedEntries.indexOf(prev);
+                if (idx !== -1) dedupedEntries[idx] = e;
+                seenKey.set(k, e);
             }
         }
 
         let authorsNote = '';
-        if (lorebookEntries.length > 0) {
+        if (dedupedEntries.length > 0) {
             const recentMsgs = history.slice(-Math.max(5, opts.loreScanWindow || 8))
                 .map(m => ({ role: m.role, content: (m.getActiveContent ? m.getActiveContent() : m.content) || '' }));
-            const result = LorebookActivationEngine.activate(lorebookEntries, recentMsgs, { tokenBudget: 1500 });
+            const result = LorebookActivationEngine.activate(dedupedEntries, recentMsgs, { tokenBudget: 1500 });
             if (result.before) systemPrompt = result.before + '\n\n' + systemPrompt;
             if (result.after) systemPrompt += '\n\n[world info]\n' + result.after;
             if (result.system) systemPrompt += '\n\n' + result.system;
             if (result.an) authorsNote = result.an;
+        }
+
+        // memories: inject the most-recent / highest-confidence ones as a system note.
+        const memoryEnabled = this.storage.getSetting('memoryEnabled', true);
+        if (memoryEnabled && this.storage.getRelevantMemories) {
+            const mems = this.storage.getRelevantMemories({
+                characterId: character.id,
+                personaId: persona?.id || null
+            });
+            if (mems.length > 0) {
+                // pick last assistant + last user message text as a relevance probe
+                const probe = history.slice(-3).map(m => (m.getActiveContent ? m.getActiveContent() : m.content) || '').join(' ').toLowerCase();
+                const scored = mems.map(m => ({
+                    m,
+                    s: (m.locked ? 0.5 : 0) + (m.confidence || 0.5) * 0.3 + MemorySimilarity.jaccard(probe, m.content) * 0.5
+                }));
+                scored.sort((a, b) => b.s - a.s);
+                const top = scored.slice(0, this.storage.getSetting('memoryInjectionLimit', 8));
+                if (top.length > 0) {
+                    systemPrompt += '\n\n[relevant memories]\n' + top.map(t => '- ' + t.m.content).join('\n');
+                }
+            }
         }
 
         if (character.postHistoryInstructions) {
@@ -1725,6 +1975,15 @@ class RPModule {
             messages.push({ role: 'system', content: '[author\'s note]\n' + authorsNote });
         }
 
+        // expand macros across every string in the final messages array.
+        // user toggles control which macros actually fire.
+        if (this.macros) {
+            const context = {
+                user: persona?.name || 'user',
+                char: character.name || 'character'
+            };
+            return this.macros.expandMessages(messages, context);
+        }
         return messages;
     }
 
@@ -1756,16 +2015,142 @@ class RPModule {
         this.chatHistory.push(userMessage);
         this.storage.addMessage(this.currentCharacter.id, userMessage);
 
+        // semantic cache lookup (only for text-only messages - skip when images are
+        // attached because the cache is text-based today).
+        let cacheLookup = null;
+        if (this.semanticCache && this.semanticCache.isEnabled() && (!payload.images || payload.images.length === 0)) {
+            try {
+                cacheLookup = await this.semanticCache.lookup(payload.text, {
+                    characterId: this.currentCharacter.id,
+                    personaId: this.currentPersona?.id || null
+                });
+                if (cacheLookup && cacheLookup.response) {
+                    // hit: return a synthetic stream that emits the cached response
+                    const cached = cacheLookup.response;
+                    const sim = cacheLookup.similarity;
+                    return {
+                        userMessage,
+                        cacheHit: true,
+                        similarity: sim,
+                        stream: (async function* () { yield cached; })()
+                    };
+                }
+            } catch (e) {
+                // cache failures must never block generation
+                console.warn('[rp] semantic cache lookup error:', e.message);
+            }
+        }
+
         // get context and send to api
         const contextMessages = this.getContextMessages();
+        const temperature = this.storage.getSetting('temperature', 0.8);
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
 
         return {
             userMessage,
-            stream: this.apiClient.streamMessage(contextMessages, {
-                temperature: this.storage.getSetting('temperature', 0.8),
-                maxTokens: this.storage.getSetting('maxTokens', 2048)
-            })
+            cacheHit: false,
+            // remember the precomputed embedding so commit can reuse it
+            _cachePrecomputedEmbedding: cacheLookup?.queryEmbedding || null,
+            _cacheText: payload.text,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens })
         };
+    }
+
+    // ---- memory: auto-extraction ----
+    // calls the llm to pull short factual statements out of the recent chat and
+    // stores them via storage.addMemory (which handles dedupe).
+    async extractMemories({ scopeKey = null } = {}) {
+        const keys = this.getApiKeys();
+        if (!keys.nvidia) return [];
+        if (!this.currentCharacter && !this.currentGroup) return [];
+
+        const history = this.currentGroup ? this.groupChatHistory : this.chatHistory;
+        if (!history || history.length < 2) return [];
+
+        // sample last 12 messages
+        const sample = history.slice(-12).map(m => {
+            const role = m.role === 'assistant' ? 'assistant' : (m.role === 'user' ? 'user' : 'system');
+            const text = m.getActiveContent ? m.getActiveContent() : m.content;
+            return `${role}: ${text}`;
+        }).join('\n');
+
+        const prompt = [
+            { role: 'system', content:
+                'you are a memory extraction system. from the conversation below, extract short, ' +
+                'lowercase statements that represent important lasting information (user preferences, ' +
+                'character backstory, plot points, locations, relationships). ignore small talk and ' +
+                'transient details. return ONLY a json array of strings, each string a memory entry ' +
+                'in lowercase. if there are none, return []. do not add commentary.'
+            },
+            { role: 'user', content: 'conversation:\n' + sample + '\n\njson:' }
+        ];
+
+        let raw;
+        try {
+            raw = await this.apiClient.sendMessage(prompt, {
+                temperature: 0.2,
+                maxTokens: 400,
+                stream: false
+            });
+        } catch (e) {
+            console.warn('[rp] memory extraction failed:', e.message);
+            return [];
+        }
+
+        // attempt to parse as JSON; fall back to splitting lines that look like memories.
+        let arr = [];
+        try {
+            const trimmed = (raw || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+            const start = trimmed.indexOf('[');
+            const end = trimmed.lastIndexOf(']');
+            const slice = start !== -1 && end !== -1 ? trimmed.slice(start, end + 1) : trimmed;
+            arr = JSON.parse(slice);
+            if (!Array.isArray(arr)) arr = [];
+        } catch (e) {
+            arr = (raw || '').split('\n')
+                .map(s => s.replace(/^[\s\-\*"\d.\)]+/, '').replace(/[",]+$/g, '').trim())
+                .filter(s => s.length > 4 && s.length < 200);
+        }
+
+        const targetScope = scopeKey || ('character:' + (this.currentCharacter?.id || this.currentGroup?.id || 'global'));
+        const added = [];
+        for (const text of arr) {
+            if (typeof text !== 'string') continue;
+            const lc = text.trim().toLowerCase();
+            if (!lc) continue;
+            const entry = this.storage.addMemory({
+                content: lc,
+                source: 'auto',
+                confidence: 0.65
+            }, targetScope);
+            added.push(entry);
+        }
+        return added;
+    }
+
+    // call after each assistant turn (best-effort, fire and forget)
+    maybeExtractMemoriesAsync() {
+        if (!this.storage.getSetting('autoMemoryEnabled', false)) return;
+        // throttle: at most every 4 assistant turns
+        const counter = (this._memTurnCounter || 0) + 1;
+        this._memTurnCounter = counter;
+        if (counter % 4 !== 0) return;
+        this.extractMemories().catch(() => {});
+    }
+
+    // ---- semantic cache commit hook ----
+    // called by the ui after an assistant message has been fully streamed in
+    async cacheLastAssistantResponse(meta) {
+        if (!this.semanticCache || !this.semanticCache.isEnabled()) return;
+        if (!meta || !meta.text || !meta.response) return;
+        try {
+            await this.semanticCache.store(meta.text, meta.response, {
+                characterId: this.currentCharacter?.id || null,
+                personaId: this.currentPersona?.id || null
+            }, meta.embedding || null);
+        } catch (e) {
+            // ignore
+        }
     }
 
     saveAssistantMessage(content) {
@@ -2309,6 +2694,402 @@ class RPModule {
             }
         }
         return out;
+    }
+}
+
+// =====================================================
+// macro engine
+// =====================================================
+// expands {{...}} placeholders in any string (system prompts, user messages,
+// lorebook content, character definitions). each built-in macro has a default
+// enabled state which can be toggled via storage.setSetting('macroToggles', {...}).
+// custom user macros live under setting 'customMacros' as { name: value } pairs.
+class MacroEngine {
+    static BUILT_INS = ['time', 'date', 'datetime', 'location', 'user', 'char', 'weather', 'random'];
+
+    constructor(storage) {
+        this.storage = storage;
+        this._geoCache = null; // { lat, lon, label, at }
+        this._weatherCache = null; // { text, at }
+    }
+
+    // returns the merged toggle map. if a macro isn't present it defaults to true.
+    getToggles() {
+        const stored = this.storage?.getSetting?.('macroToggles', null) || {};
+        const map = {};
+        for (const name of MacroEngine.BUILT_INS) map[name] = stored[name] !== false;
+        // any custom macros are listed too, default-on
+        const custom = this.storage?.getSetting?.('customMacros', {}) || {};
+        for (const k of Object.keys(custom)) {
+            if (stored[k] === undefined) map[k] = true;
+            else map[k] = !!stored[k];
+        }
+        return map;
+    }
+
+    setToggle(name, value) {
+        const map = this.storage?.getSetting?.('macroToggles', {}) || {};
+        map[name] = !!value;
+        this.storage?.setSetting?.('macroToggles', map);
+    }
+
+    setCustomMacros(obj) {
+        this.storage?.setSetting?.('customMacros', obj || {});
+    }
+
+    getCustomMacros() {
+        return this.storage?.getSetting?.('customMacros', {}) || {};
+    }
+
+    // expand `text` using the supplied context. opts.location/weather overrides
+    // skip the corresponding async lookups. context = { user, char }.
+    expand(text, context = {}, opts = {}) {
+        if (!text || typeof text !== 'string') return text;
+        const toggles = this.getToggles();
+        const custom = this.getCustomMacros();
+
+        return text.replace(/\{\{\s*([a-zA-Z_][\w]*)(?:\s*:\s*([^}]+))?\s*\}\}/g, (match, name, arg) => {
+            const key = name.toLowerCase();
+            // disabled macros are left untouched (per spec: leave as is)
+            if (toggles[key] === false) return match;
+
+            switch (key) {
+                case 'time': {
+                    const fmt = this.storage?.getSetting?.('macroTimeFormat', '24h');
+                    return new Date().toLocaleTimeString(undefined, {
+                        hour12: fmt === '12h',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                }
+                case 'date':
+                    return new Date().toLocaleDateString();
+                case 'datetime':
+                    return new Date().toLocaleString();
+                case 'location':
+                    if (opts.location !== undefined) return opts.location;
+                    return (this._geoCache?.label) || this.storage?.getSetting?.('macroLocation', 'unknown location');
+                case 'user':
+                    return context.user || 'user';
+                case 'char':
+                    return context.char || 'character';
+                case 'weather':
+                    if (opts.weather !== undefined) return opts.weather;
+                    return (this._weatherCache?.text) || 'weather unavailable';
+                case 'random': {
+                    const range = (arg || '1-100').split('-').map(s => parseInt(s.trim(), 10));
+                    if (range.length !== 2 || isNaN(range[0]) || isNaN(range[1])) return match;
+                    const [a, b] = [Math.min(range[0], range[1]), Math.max(range[0], range[1])];
+                    return String(Math.floor(Math.random() * (b - a + 1)) + a);
+                }
+                default:
+                    // custom macro lookup
+                    if (Object.prototype.hasOwnProperty.call(custom, key)) {
+                        return String(custom[key] ?? '');
+                    }
+                    // unrecognized macros are left in place (helps users notice typos)
+                    return match;
+            }
+        });
+    }
+
+    // expands every string in an openai-style messages array (used right before send).
+    expandMessages(messages, context = {}, opts = {}) {
+        if (!Array.isArray(messages)) return messages;
+        return messages.map(m => {
+            if (typeof m.content === 'string') {
+                return { ...m, content: this.expand(m.content, context, opts) };
+            }
+            if (Array.isArray(m.content)) {
+                return {
+                    ...m,
+                    content: m.content.map(part => {
+                        if (part && part.type === 'text' && typeof part.text === 'string') {
+                            return { ...part, text: this.expand(part.text, context, opts) };
+                        }
+                        return part;
+                    })
+                };
+            }
+            return m;
+        });
+    }
+
+    // attempt to populate location via browser geolocation. cached for 10 minutes.
+    async refreshLocation() {
+        if (!navigator.geolocation) return null;
+        if (this._geoCache && (Date.now() - this._geoCache.at) < 10 * 60 * 1000) return this._geoCache;
+        return new Promise((resolve) => {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const { latitude, longitude } = pos.coords;
+                    this._geoCache = {
+                        lat: latitude,
+                        lon: longitude,
+                        label: `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
+                        at: Date.now()
+                    };
+                    resolve(this._geoCache);
+                },
+                () => resolve(null),
+                { timeout: 4000, maximumAge: 10 * 60 * 1000 }
+            );
+        });
+    }
+
+    // best-effort weather via wttr.in (no key needed). cached 30 minutes.
+    async refreshWeather() {
+        if (this._weatherCache && (Date.now() - this._weatherCache.at) < 30 * 60 * 1000) return this._weatherCache;
+        try {
+            let url = 'https://wttr.in/?format=%C+%t';
+            if (this._geoCache) url = `https://wttr.in/${this._geoCache.lat},${this._geoCache.lon}?format=%C+%t`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error('weather fetch failed: ' + res.status);
+            const text = (await res.text()).trim();
+            this._weatherCache = { text, at: Date.now() };
+            return this._weatherCache;
+        } catch (e) {
+            return null;
+        }
+    }
+}
+
+// =====================================================
+// memory system (auto + manual)
+// =====================================================
+class MemoryEntry {
+    constructor(data = {}) {
+        this.id = data.id || ('mem_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6));
+        this.content = (data.content || '').toLowerCase(); // always lowercase per spec
+        this.source = data.source === 'manual' ? 'manual' : 'auto';
+        this.createdAt = data.createdAt || new Date().toISOString();
+        this.lastRelevantAt = data.lastRelevantAt || null;
+        this.confidence = typeof data.confidence === 'number' ? data.confidence : 0.6;
+        this.tags = Array.isArray(data.tags) ? data.tags : [];
+        this.locked = !!data.locked;
+        this.scopeKey = data.scopeKey || 'global'; // 'character:<id>' | 'persona:<id>' | 'global'
+    }
+}
+
+// simple text-similarity helper used to dedupe memories.
+class MemorySimilarity {
+    static tokenize(str) {
+        return (str || '').toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').split(/\s+/).filter(Boolean);
+    }
+
+    // jaccard similarity over token sets; cheap and surprisingly effective for
+    // short factual sentences.
+    static jaccard(a, b) {
+        const ta = new Set(MemorySimilarity.tokenize(a));
+        const tb = new Set(MemorySimilarity.tokenize(b));
+        if (ta.size === 0 && tb.size === 0) return 1;
+        let inter = 0;
+        for (const t of ta) if (tb.has(t)) inter++;
+        const union = ta.size + tb.size - inter;
+        return union === 0 ? 0 : inter / union;
+    }
+
+    // higher of jaccard or substring ratio - keeps "user lives in tokyo" and
+    // "the user lives in tokyo, japan" looking similar.
+    static score(a, b) {
+        return Math.max(
+            MemorySimilarity.jaccard(a, b),
+            MemorySimilarity._substringRatio(a, b)
+        );
+    }
+
+    static _substringRatio(a, b) {
+        if (!a || !b) return 0;
+        const longer = a.length >= b.length ? a : b;
+        const shorter = a.length < b.length ? a : b;
+        return longer.toLowerCase().includes(shorter.toLowerCase()) ? shorter.length / longer.length : 0;
+    }
+}
+
+// =====================================================
+// semantic cache (nvidia embeddings)
+// =====================================================
+// stores embeddings + responses for prior user messages keyed by character.
+// on a new query we embed the text, compute cosine similarity vs cached entries
+// for the same (character, persona) bucket, and return the cached response if
+// the best match exceeds the threshold. cleared when ttl elapses or the
+// character's lorebook content changes.
+class SemanticCache {
+    static EMBED_ENDPOINT = 'https://integrate.api.nvidia.com/v1/embeddings';
+    static EMBED_MODEL = 'nvidia/llama-nemotron-embed-vl-1b-v2';
+    static STORAGE_KEY = 'llms_rp_semantic_cache';
+
+    constructor(keyPool, storage) {
+        this.keyPool = keyPool;
+        this.storage = storage;
+        this._entries = null; // lazy-loaded
+    }
+
+    _load() {
+        if (this._entries) return this._entries;
+        try {
+            const raw = localStorage.getItem(SemanticCache.STORAGE_KEY) || '[]';
+            this._entries = JSON.parse(raw);
+        } catch (e) {
+            this._entries = [];
+        }
+        return this._entries;
+    }
+
+    _save() {
+        try {
+            // cap cache to 500 entries
+            if (this._entries.length > 500) {
+                this._entries.sort((a, b) => b.at - a.at);
+                this._entries = this._entries.slice(0, 500);
+            }
+            localStorage.setItem(SemanticCache.STORAGE_KEY, JSON.stringify(this._entries));
+        } catch (e) {
+            console.warn('[rp] semantic cache save failed:', e);
+        }
+    }
+
+    isEnabled() {
+        return !!this.storage?.getSetting?.('semanticCacheEnabled', false);
+    }
+
+    getThreshold() {
+        return this.storage?.getSetting?.('semanticCacheThreshold', 0.92);
+    }
+
+    getTTLms() {
+        // default 7 days, configurable
+        const days = this.storage?.getSetting?.('semanticCacheTTLDays', 7);
+        return Math.max(1, Math.min(60, days)) * 24 * 60 * 60 * 1000;
+    }
+
+    // generate an embedding via nvidia. throws if no key configured.
+    async embed(text) {
+        const apiKey = this.keyPool?.getActiveKey?.();
+        if (!apiKey) throw new Error('no nvidia api key configured for embeddings');
+        const res = await fetch(SemanticCache.EMBED_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: SemanticCache.EMBED_MODEL,
+                input: [text],
+                input_type: 'query',
+                encoding_format: 'float',
+                truncate: 'END'
+            })
+        });
+        if (!res.ok) {
+            const txt = await res.text().catch(() => '');
+            throw new Error('embedding request failed: ' + res.status + ' ' + txt.substring(0, 200));
+        }
+        const data = await res.json();
+        const vec = data?.data?.[0]?.embedding;
+        if (!Array.isArray(vec)) throw new Error('embedding response missing vector');
+        return vec;
+    }
+
+    static cosine(a, b) {
+        if (!a || !b || a.length !== b.length) return 0;
+        let dot = 0, na = 0, nb = 0;
+        for (let i = 0; i < a.length; i++) {
+            dot += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        const denom = Math.sqrt(na) * Math.sqrt(nb);
+        return denom === 0 ? 0 : dot / denom;
+    }
+
+    // returns the cached response object or null. cached entries are filtered
+    // by characterId + personaId so personas don't leak into each other.
+    async lookup(text, scope) {
+        if (!this.isEnabled()) return null;
+        if (!text || typeof text !== 'string' || text.trim().length === 0) return null;
+
+        const entries = this._load();
+        const ttl = this.getTTLms();
+        const now = Date.now();
+        const fresh = entries.filter(e =>
+            (now - (e.at || 0)) < ttl &&
+            e.characterId === (scope?.characterId || null) &&
+            e.personaId === (scope?.personaId || null)
+        );
+
+        // skip the embedding round-trip entirely if there's nothing to compare to
+        if (fresh.length === 0) return null;
+
+        let embedding;
+        try {
+            embedding = await this.embed(text);
+        } catch (e) {
+            // never block the chat on cache problems
+            console.warn('[rp] semantic cache lookup failed:', e.message);
+            return null;
+        }
+
+        const threshold = this.getThreshold();
+        let best = null;
+        let bestScore = 0;
+        for (const e of fresh) {
+            const score = SemanticCache.cosine(embedding, e.embedding);
+            if (score > bestScore) {
+                bestScore = score;
+                best = e;
+            }
+        }
+        if (best && bestScore >= threshold) {
+            return {
+                response: best.response,
+                similarity: bestScore,
+                cachedAt: best.at,
+                queryEmbedding: embedding
+            };
+        }
+        return { hit: false, queryEmbedding: embedding };
+    }
+
+    // store a (text, response) pair under the (character, persona) bucket.
+    // if a precomputed embedding is supplied it's reused to avoid a second call.
+    async store(text, response, scope, precomputedEmbedding = null) {
+        if (!this.isEnabled()) return;
+        try {
+            const embedding = precomputedEmbedding || await this.embed(text);
+            const entries = this._load();
+            entries.push({
+                text,
+                response,
+                embedding,
+                at: Date.now(),
+                characterId: scope?.characterId || null,
+                personaId: scope?.personaId || null
+            });
+            this._entries = entries;
+            this._save();
+        } catch (e) {
+            console.warn('[rp] semantic cache store failed:', e.message);
+        }
+    }
+
+    clear(scope = null) {
+        if (!scope) {
+            this._entries = [];
+        } else {
+            this._entries = this._load().filter(e =>
+                !(e.characterId === (scope.characterId || null) && e.personaId === (scope.personaId || null))
+            );
+        }
+        this._save();
+    }
+
+    stats() {
+        const entries = this._load();
+        return {
+            total: entries.length,
+            sizeBytes: localStorage.getItem(SemanticCache.STORAGE_KEY)?.length || 0
+        };
     }
 }
 
@@ -3123,6 +3904,8 @@ class RPUIController {
                     </div>
                 </div>
                 <div class="rp-chat-header-actions">
+                    <button class="rp-action-btn" id="rp-memory-btn" title="memories">🧠</button>
+                    <button class="rp-action-btn" id="rp-macros-btn" title="macros">🪄</button>
                     ${isGroup ? '' : `<button class="rp-action-btn" id="rp-summarize-chat" title="summarize">📝</button>`}
                     <button class="rp-action-btn" id="rp-clear-chat" title="clear chat">🗑️</button>
                     ${isGroup ? `<button class="rp-action-btn" id="rp-group-next" title="next speaker">⏭️</button>` : `<button class="rp-action-btn" id="rp-regenerate" title="regenerate">🔄</button>`}
@@ -3140,6 +3923,8 @@ class RPUIController {
             document.getElementById('rp-regenerate')?.addEventListener('click', () => this.regenerateLastMessage());
             document.getElementById('rp-summarize-chat')?.addEventListener('click', () => this.showSummarizeModal());
             document.getElementById('rp-group-next')?.addEventListener('click', () => this.handleGroupNext());
+            document.getElementById('rp-memory-btn')?.addEventListener('click', () => this.toggleMemoryPanel());
+            document.getElementById('rp-macros-btn')?.addEventListener('click', () => this.showMacrosModal());
         }
 
         // build messages via dom for safe rendering
@@ -3639,7 +4424,8 @@ class RPUIController {
                 return;
             }
 
-            const { stream } = await this.rp.sendMessage(text, this.consumePendingAttachmentUrls());
+            const sendResult = await this.rp.sendMessage(text, this.consumePendingAttachmentUrls());
+            const { stream, cacheHit, similarity, _cachePrecomputedEmbedding, _cacheText } = sendResult;
             this.pendingImages = [];
             this.renderAttachmentTray();
 
@@ -3653,7 +4439,7 @@ class RPUIController {
                     ${!avatarUrl ? '🎭' : ''}
                 </div>
                 <div class="rp-message-content">
-                    <div class="rp-message-name">${this.escapeHtml(this.rp.currentCharacter.name)}</div>
+                    <div class="rp-message-name">${this.escapeHtml(this.rp.currentCharacter.name)}${cacheHit ? ` <span class="rp-cache-badge" title="semantic cache hit (similarity ${(similarity || 0).toFixed(2)})">cached</span>` : ''}</div>
                     <div class="rp-message-text"></div>
                 </div>
             `;
@@ -3671,8 +4457,20 @@ class RPUIController {
 
             this.rp.saveAssistantMessage(fullContent);
 
+            // store this response in the cache (skip if it was already a cache hit)
+            if (!cacheHit) {
+                this.rp.cacheLastAssistantResponse({
+                    text: _cacheText,
+                    response: fullContent,
+                    embedding: _cachePrecomputedEmbedding
+                }).catch(() => {});
+            }
+
             // auto-summarize when context is large
             this.maybeAutoSummarize();
+
+            // best-effort memory extraction
+            this.rp.maybeExtractMemoriesAsync();
 
             assistantMsgDiv.classList.remove('rp-message-streaming');
             this.renderChat();
@@ -4297,6 +5095,303 @@ class RPUIController {
         });
     }
 
+    // ---- memory panel ----
+    toggleMemoryPanel() {
+        let panel = document.getElementById('rp-memory-panel');
+        if (panel && panel.classList.contains('open')) {
+            panel.classList.remove('open');
+            setTimeout(() => panel.remove(), 250);
+            return;
+        }
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'rp-memory-panel';
+            panel.className = 'rp-memory-panel';
+            document.body.appendChild(panel);
+        }
+        this.renderMemoryPanel(panel);
+        requestAnimationFrame(() => panel.classList.add('open'));
+    }
+
+    renderMemoryPanel(panel) {
+        const isGroup = !!this.rp.currentGroup;
+        const cid = isGroup ? this.rp.currentGroup?.id : this.rp.currentCharacter?.id;
+        const pid = this.rp.currentPersona?.id || null;
+        const scopeKey = cid ? ('character:' + cid) : 'global';
+        const personaScopeKey = pid ? ('persona:' + pid) : null;
+        const autoEnabled = this.rp.storage.getSetting('autoMemoryEnabled', false);
+
+        panel.innerHTML = `
+            <div class="rp-memory-panel-header">
+                <h3>🧠 memories</h3>
+                <div class="rp-memory-panel-actions">
+                    <label class="rp-switch">
+                        <input type="checkbox" id="rp-auto-memory" ${autoEnabled ? 'checked' : ''}>
+                        <span>auto-extract</span>
+                    </label>
+                    <button class="rp-action-btn" id="rp-mem-extract" title="extract from chat">+ extract</button>
+                    <button class="rp-action-btn" id="rp-mem-add" title="add manually">+ add</button>
+                    <button class="rp-action-btn" id="rp-mem-close" title="close">✕</button>
+                </div>
+            </div>
+            <div class="rp-memory-list" id="rp-memory-list"></div>`;
+
+        const listEl = panel.querySelector('#rp-memory-list');
+        const renderList = () => {
+            listEl.innerHTML = '';
+            // group by scope for clarity
+            const sections = [
+                { title: 'character', scope: scopeKey, items: this.rp.storage.getMemories(scopeKey) }
+            ];
+            if (personaScopeKey) sections.push({ title: 'persona', scope: personaScopeKey, items: this.rp.storage.getMemories(personaScopeKey) });
+            sections.push({ title: 'global', scope: 'global', items: this.rp.storage.getMemories('global') });
+
+            let totalItems = 0;
+            for (const sec of sections) {
+                if (!sec.items || sec.items.length === 0) continue;
+                const heading = document.createElement('div');
+                heading.className = 'rp-memory-section-title';
+                heading.textContent = sec.title + ' (' + sec.items.length + ')';
+                listEl.appendChild(heading);
+                for (const m of sec.items) {
+                    totalItems++;
+                    const item = document.createElement('div');
+                    item.className = 'rp-memory-item' + (m.locked ? ' locked' : '');
+                    const ta = document.createElement('textarea');
+                    ta.rows = 2;
+                    ta.value = m.content;
+                    ta.addEventListener('blur', () => {
+                        this.rp.storage.updateMemory(m.id, { content: ta.value.toLowerCase() }, sec.scope);
+                    });
+                    item.appendChild(ta);
+                    const meta = document.createElement('div');
+                    meta.className = 'rp-memory-item-meta';
+                    const src = document.createElement('span');
+                    src.className = 'rp-memory-source-' + m.source;
+                    src.textContent = m.source;
+                    meta.appendChild(src);
+                    const conf = document.createElement('span');
+                    conf.textContent = `conf ${(m.confidence || 0).toFixed(2)}`;
+                    meta.appendChild(conf);
+                    const actions = document.createElement('div');
+                    actions.className = 'rp-memory-item-actions';
+                    const lockBtn = document.createElement('button');
+                    lockBtn.className = 'rp-action-btn';
+                    lockBtn.title = m.locked ? 'unlock' : 'lock';
+                    lockBtn.textContent = m.locked ? '🔓' : '🔒';
+                    lockBtn.addEventListener('click', () => {
+                        this.rp.storage.updateMemory(m.id, { locked: !m.locked }, sec.scope);
+                        renderList();
+                    });
+                    actions.appendChild(lockBtn);
+                    const del = document.createElement('button');
+                    del.className = 'rp-action-btn rp-action-delete';
+                    del.title = 'delete';
+                    del.textContent = '🗑️';
+                    del.addEventListener('click', () => {
+                        if (confirm('delete memory?')) {
+                            this.rp.storage.deleteMemory(m.id, sec.scope);
+                            renderList();
+                        }
+                    });
+                    actions.appendChild(del);
+                    meta.appendChild(actions);
+                    item.appendChild(meta);
+                    listEl.appendChild(item);
+                }
+            }
+            if (totalItems === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'rp-empty-desc';
+                empty.style.padding = '0.5rem';
+                empty.textContent = 'no memories yet. enable auto-extract or click + add to create one.';
+                listEl.appendChild(empty);
+            }
+        };
+        renderList();
+
+        panel.querySelector('#rp-auto-memory').addEventListener('change', (e) => {
+            this.rp.storage.setSetting('autoMemoryEnabled', e.target.checked);
+            showToast?.(e.target.checked ? 'auto-memory enabled' : 'auto-memory disabled');
+        });
+        panel.querySelector('#rp-mem-add').addEventListener('click', () => {
+            const text = prompt('memory text (will be lowercased):');
+            if (!text) return;
+            this.rp.storage.addMemory({ content: text.toLowerCase(), source: 'manual', confidence: 1 }, scopeKey);
+            renderList();
+        });
+        panel.querySelector('#rp-mem-extract').addEventListener('click', async () => {
+            const btn = panel.querySelector('#rp-mem-extract');
+            btn.disabled = true; btn.textContent = 'extracting...';
+            try {
+                const added = await this.rp.extractMemories({ scopeKey });
+                showToast?.(`extracted ${added.length} memor${added.length === 1 ? 'y' : 'ies'}`);
+            } catch (e) {
+                showToast?.('extraction failed: ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = '+ extract';
+                renderList();
+            }
+        });
+        panel.querySelector('#rp-mem-close').addEventListener('click', () => this.toggleMemoryPanel());
+    }
+
+    // ---- macros modal ----
+    async showMacrosModal() {
+        const toggles = this.rp.macros.getToggles();
+        const custom = this.rp.macros.getCustomMacros();
+        // optionally refresh location/weather snapshots so the preview is meaningful
+        if (toggles.location && this.rp.storage.getSetting('macroLocationAuto', false)) {
+            this.rp.macros.refreshLocation().catch(() => {});
+        }
+        if (toggles.weather && this.rp.storage.getSetting('macroWeatherAuto', false)) {
+            this.rp.macros.refreshWeather().catch(() => {});
+        }
+
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body">
+                <h3>🪄 macros</h3>
+                <p>insert <code>{{name}}</code> placeholders anywhere in your character / lorebook / messages and they'll be expanded at send time. disabled macros are left as-is.</p>
+                <div id="rp-macros-builtins"></div>
+                <h4 style="color:#f5af12;margin:0.5rem 0;">custom macros</h4>
+                <div id="rp-macros-custom"></div>
+                <button class="rp-btn" id="rp-macros-add-custom">+ add custom</button>
+                <div class="rp-form-group">
+                    <label>time format</label>
+                    <select id="rp-macros-time-fmt">
+                        <option value="24h" ${this.rp.storage.getSetting('macroTimeFormat','24h')==='24h'?'selected':''}>24h</option>
+                        <option value="12h" ${this.rp.storage.getSetting('macroTimeFormat','24h')==='12h'?'selected':''}>12h</option>
+                    </select>
+                </div>
+                <div class="rp-form-group">
+                    <label><input type="checkbox" id="rp-macros-geo" ${this.rp.storage.getSetting('macroLocationAuto', false)?'checked':''}> request browser geolocation for {{location}}</label>
+                </div>
+                <div class="rp-form-group">
+                    <label><input type="checkbox" id="rp-macros-weather" ${this.rp.storage.getSetting('macroWeatherAuto', false)?'checked':''}> fetch {{weather}} via wttr.in</label>
+                </div>
+                <div class="rp-form-group">
+                    <label>preview</label>
+                    <textarea id="rp-macros-sample" rows="3">hi {{char}}, it is {{time}} on {{date}}. i am at {{location}}. random {{random:1-100}}.</textarea>
+                    <div class="rp-macro-preview" id="rp-macros-preview"></div>
+                </div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-macros-reset">reset toggles</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-macros-close">done</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => modal.remove());
+        document.body.appendChild(modal);
+
+        const builtins = modal.querySelector('#rp-macros-builtins');
+        const sampleValues = {
+            time: new Date().toLocaleTimeString(),
+            date: new Date().toLocaleDateString(),
+            datetime: new Date().toLocaleString(),
+            location: 'unknown location',
+            user: this.rp.currentPersona?.name || 'user',
+            char: this.rp.currentCharacter?.name || 'character',
+            weather: 'weather unavailable',
+            random: 'random number'
+        };
+        for (const name of MacroEngine.BUILT_INS) {
+            const row = document.createElement('div');
+            row.className = 'rp-macro-row';
+            row.innerHTML = `
+                <span class="rp-macro-name">{{${name}}}</span>
+                <span class="rp-macro-value">${this.escapeHtml(sampleValues[name] || '')}</span>
+                <input type="checkbox" class="rp-macro-toggle" data-name="${name}" ${toggles[name] ? 'checked' : ''}>`;
+            row.querySelector('.rp-macro-toggle').addEventListener('change', (e) => {
+                this.rp.macros.setToggle(name, e.target.checked);
+                refreshPreview();
+            });
+            builtins.appendChild(row);
+        }
+
+        const customRoot = modal.querySelector('#rp-macros-custom');
+        const customObj = Object.assign({}, custom);
+        const renderCustom = () => {
+            customRoot.innerHTML = '';
+            for (const [k, v] of Object.entries(customObj)) {
+                const row = document.createElement('div');
+                row.className = 'rp-custom-macro-row';
+                row.innerHTML = `
+                    <input type="text" placeholder="name (no spaces)" value="${this.escapeHtml(k)}" data-role="name">
+                    <input type="text" placeholder="value" value="${this.escapeHtml(v)}" data-role="value">
+                    <button class="rp-action-btn rp-action-delete" data-action="del">🗑️</button>`;
+                row.querySelector('[data-role="name"]').addEventListener('change', (e) => {
+                    const newK = e.target.value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+                    if (newK && newK !== k) {
+                        customObj[newK] = customObj[k];
+                        delete customObj[k];
+                        this.rp.macros.setCustomMacros(customObj);
+                        renderCustom();
+                    }
+                });
+                row.querySelector('[data-role="value"]').addEventListener('change', (e) => {
+                    customObj[k] = e.target.value;
+                    this.rp.macros.setCustomMacros(customObj);
+                    refreshPreview();
+                });
+                row.querySelector('[data-action="del"]').addEventListener('click', () => {
+                    delete customObj[k];
+                    this.rp.macros.setCustomMacros(customObj);
+                    renderCustom();
+                    refreshPreview();
+                });
+                customRoot.appendChild(row);
+            }
+        };
+        renderCustom();
+
+        modal.querySelector('#rp-macros-add-custom').addEventListener('click', () => {
+            let name = prompt('custom macro name (no spaces, e.g. "my_var"):');
+            if (!name) return;
+            name = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+            const value = prompt('value:') || '';
+            customObj[name] = value;
+            this.rp.macros.setCustomMacros(customObj);
+            renderCustom();
+            refreshPreview();
+        });
+
+        modal.querySelector('#rp-macros-time-fmt').addEventListener('change', (e) => {
+            this.rp.storage.setSetting('macroTimeFormat', e.target.value);
+            refreshPreview();
+        });
+        modal.querySelector('#rp-macros-geo').addEventListener('change', async (e) => {
+            this.rp.storage.setSetting('macroLocationAuto', e.target.checked);
+            if (e.target.checked) await this.rp.macros.refreshLocation();
+            refreshPreview();
+        });
+        modal.querySelector('#rp-macros-weather').addEventListener('change', async (e) => {
+            this.rp.storage.setSetting('macroWeatherAuto', e.target.checked);
+            if (e.target.checked) await this.rp.macros.refreshWeather();
+            refreshPreview();
+        });
+
+        const sampleEl = modal.querySelector('#rp-macros-sample');
+        const previewEl = modal.querySelector('#rp-macros-preview');
+        const refreshPreview = () => {
+            const expanded = this.rp.macros.expand(sampleEl.value, {
+                user: this.rp.currentPersona?.name || 'user',
+                char: this.rp.currentCharacter?.name || 'character'
+            });
+            previewEl.textContent = expanded;
+        };
+        sampleEl.addEventListener('input', refreshPreview);
+        refreshPreview();
+
+        modal.querySelector('#rp-macros-reset').addEventListener('click', () => {
+            this.rp.storage.setSetting('macroToggles', {});
+            showToast?.('macros reset to defaults');
+            modal.remove();
+        });
+        modal.querySelector('#rp-macros-close').addEventListener('click', () => modal.remove());
+    }
+
     // ---- quick reply manager ----
     showQuickReplyManager() {
         const modal = document.createElement('div');
@@ -4491,6 +5586,46 @@ class RPUIController {
                 </div>
 
                 <div class="rp-settings-section">
+                    <h3>lorebooks (user / character / world)</h3>
+                    <p style="color:#888;font-size:0.85rem;">manage world info shared across characters. character-embedded lore is edited from the character editor.</p>
+                    <button class="rp-btn" id="rp-open-lorebooks">📚 open lorebook manager</button>
+                </div>
+
+                <div class="rp-settings-section">
+                    <h3>memory</h3>
+                    <div class="rp-form-group">
+                        <label><input type="checkbox" id="rp-memory-enabled" ${this.rp.storage.getSetting('memoryEnabled', true) ? 'checked' : ''}> inject memories into prompts</label>
+                    </div>
+                    <div class="rp-form-group">
+                        <label><input type="checkbox" id="rp-auto-memory-enabled" ${this.rp.storage.getSetting('autoMemoryEnabled', false) ? 'checked' : ''}> auto-extract memories after every 4 assistant turns</label>
+                    </div>
+                    <div class="rp-form-group">
+                        <label>max memories injected per request</label>
+                        <input type="number" id="rp-memory-limit" min="1" max="20" value="${this.rp.storage.getSetting('memoryInjectionLimit', 8)}">
+                    </div>
+                </div>
+
+                <div class="rp-settings-section">
+                    <h3>semantic cache (nvidia embeddings)</h3>
+                    <div class="rp-form-group">
+                        <label><input type="checkbox" id="rp-cache-enabled" ${this.rp.storage.getSetting('semanticCacheEnabled', false) ? 'checked' : ''}> enable semantic caching</label>
+                        <small>uses nvidia/llama-nemotron-embed-vl-1b-v2. text-only messages are eligible. cache is per (character, persona).</small>
+                    </div>
+                    <div class="rp-form-group">
+                        <label>similarity threshold: <span id="rp-cache-thr-val">${this.rp.storage.getSetting('semanticCacheThreshold', 0.92)}</span></label>
+                        <input type="range" id="rp-cache-threshold" min="0.7" max="0.99" step="0.01" value="${this.rp.storage.getSetting('semanticCacheThreshold', 0.92)}">
+                    </div>
+                    <div class="rp-form-group">
+                        <label>ttl (days)</label>
+                        <input type="number" id="rp-cache-ttl" min="1" max="60" value="${this.rp.storage.getSetting('semanticCacheTTLDays', 7)}">
+                    </div>
+                    <div class="rp-settings-actions">
+                        <button class="rp-btn" id="rp-cache-clear">clear cache</button>
+                        <span id="rp-cache-stats" style="color:#888;font-size:0.85rem;align-self:center;"></span>
+                    </div>
+                </div>
+
+                <div class="rp-settings-section">
                     <h3>data</h3>
                     <div class="rp-settings-actions">
                         <button class="rp-btn" id="rp-export-all">export all data</button>
@@ -4591,12 +5726,255 @@ class RPUIController {
                 localStorage.removeItem(RP_STORAGE_KEYS.CHATS);
                 localStorage.removeItem(RP_STORAGE_KEYS.SETTINGS);
                 localStorage.removeItem(RP_STORAGE_KEYS.LOREBOOKS);
+                localStorage.removeItem(RP_STORAGE_KEYS.MEMORIES);
+                localStorage.removeItem(RP_STORAGE_KEYS.LOREBOOK_META);
+                localStorage.removeItem(SemanticCache.STORAGE_KEY);
 
                 this.rp.storage.loadAll();
                 showToast?.('all data cleared');
                 this.showView('characterGrid');
                 this.renderCharacterGrid();
             }
+        });
+
+        // ---- lorebook manager ----
+        document.getElementById('rp-open-lorebooks')?.addEventListener('click', () => this.showLorebookManager());
+
+        // ---- memory settings ----
+        document.getElementById('rp-memory-enabled')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('memoryEnabled', e.target.checked);
+        });
+        document.getElementById('rp-auto-memory-enabled')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('autoMemoryEnabled', e.target.checked);
+        });
+        document.getElementById('rp-memory-limit')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('memoryInjectionLimit', Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 8)));
+        });
+
+        // ---- semantic cache settings ----
+        document.getElementById('rp-cache-enabled')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('semanticCacheEnabled', e.target.checked);
+            showToast?.(e.target.checked ? 'semantic cache on' : 'semantic cache off');
+        });
+        const thresholdEl = document.getElementById('rp-cache-threshold');
+        const thresholdValEl = document.getElementById('rp-cache-thr-val');
+        thresholdEl?.addEventListener('input', (e) => {
+            thresholdValEl.textContent = e.target.value;
+        });
+        thresholdEl?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('semanticCacheThreshold', parseFloat(e.target.value) || 0.92);
+        });
+        document.getElementById('rp-cache-ttl')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('semanticCacheTTLDays', Math.max(1, Math.min(60, parseInt(e.target.value, 10) || 7)));
+        });
+        document.getElementById('rp-cache-clear')?.addEventListener('click', () => {
+            if (!confirm('clear all cached responses?')) return;
+            this.rp.semanticCache.clear();
+            showToast?.('cache cleared');
+            updateCacheStats();
+        });
+        const updateCacheStats = () => {
+            const s = this.rp.semanticCache.stats();
+            const el = document.getElementById('rp-cache-stats');
+            if (el) el.textContent = `${s.total} entries · ${(s.sizeBytes / 1024).toFixed(1)} kb`;
+        };
+        updateCacheStats();
+    }
+
+    // ---- lorebook manager modal (user / character / world) ----
+    showLorebookManager() {
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body" style="max-width:760px;">
+                <h3>📚 lorebook manager</h3>
+                <div class="rp-form-group">
+                    <label>filter</label>
+                    <select id="rp-lb-filter">
+                        <option value="all">all</option>
+                        <option value="user">user lorebooks</option>
+                        <option value="character">character lorebooks</option>
+                        <option value="world">world lorebook</option>
+                    </select>
+                </div>
+                <div id="rp-lb-list"></div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-lb-new-user">+ new user lorebook</button>
+                    <button class="rp-btn" id="rp-lb-new-character">+ new character lorebook</button>
+                    ${this.rp.storage.getWorldLorebookId() ? '' : '<button class="rp-btn" id="rp-lb-new-world">+ create world lorebook</button>'}
+                    <button class="rp-btn rp-btn-primary" id="rp-lb-close">done</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => modal.remove());
+        document.body.appendChild(modal);
+        document.getElementById('rp-lb-close').addEventListener('click', () => modal.remove());
+
+        const renderList = () => {
+            const root = modal.querySelector('#rp-lb-list');
+            root.innerHTML = '';
+            const filter = modal.querySelector('#rp-lb-filter').value;
+            const all = this.rp.storage.getAllLorebookMeta();
+            const filtered = filter === 'all' ? all : all.filter(m => m.type === filter);
+            if (filtered.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'rp-empty-desc';
+                empty.style.padding = '0.75rem 0';
+                empty.textContent = 'no lorebooks. character-embedded entries are edited in the character editor.';
+                root.appendChild(empty);
+                return;
+            }
+            for (const meta of filtered) {
+                const lb = this.rp.storage.getLorebook(meta.id) || [];
+                const card = document.createElement('div');
+                card.className = 'rp-qr-set';
+                const allPersonas = this.rp.storage.getAllPersonas();
+                const allChars = this.rp.storage.getAllCharacters();
+                const scopeOptions = meta.type === 'user'
+                    ? `<option value="">(none)</option>` + allPersonas.map(p => `<option value="${this.escapeHtml(p.id)}" ${meta.scopeId === p.id ? 'selected' : ''}>${this.escapeHtml(p.name)}</option>`).join('')
+                    : meta.type === 'character'
+                        ? `<option value="">(none)</option>` + allChars.map(c => `<option value="${this.escapeHtml(c.id)}" ${meta.scopeId === c.id ? 'selected' : ''}>${this.escapeHtml(c.name)}</option>`).join('')
+                        : `<option value="">(global)</option>`;
+                card.innerHTML = `
+                    <div class="rp-qr-set-header">
+                        <input type="text" data-field="name" value="${this.escapeHtml(meta.name)}" placeholder="lorebook name">
+                        <span class="rp-cache-badge">${meta.type}</span>
+                        <select data-field="scopeId" ${meta.type === 'world' ? 'disabled' : ''}>${scopeOptions}</select>
+                        <span style="color:#888;font-size:0.8rem;">${lb.length} entr${lb.length === 1 ? 'y' : 'ies'}</span>
+                        <button class="rp-action-btn rp-action-delete" data-action="del" title="delete">🗑️</button>
+                    </div>
+                    <div class="rp-lore-row-meta">
+                        <label>reality:
+                            <select data-field="realityType">
+                                <option value="fictional" ${meta.realityType === 'fictional' ? 'selected' : ''}>fictional world</option>
+                                <option value="realLife" ${meta.realityType === 'realLife' ? 'selected' : ''}>real life</option>
+                            </select>
+                        </label>
+                        <label>start: <input type="text" data-field="start" value="${this.escapeHtml(meta.timeframe?.start || '')}" placeholder="e.g. 1885 or medieval"></label>
+                        <label>end: <input type="text" data-field="end" value="${this.escapeHtml(meta.timeframe?.end || '')}" placeholder="e.g. 1900 or now"></label>
+                        <label style="flex:1;">desc: <input type="text" data-field="description" value="${this.escapeHtml(meta.timeframe?.description || '')}" placeholder="e.g. victorian london"></label>
+                    </div>
+                    <button type="button" class="rp-btn" data-action="editEntries">edit ${lb.length} entr${lb.length === 1 ? 'y' : 'ies'}</button>`;
+
+                const persist = () => {
+                    const newMeta = {
+                        name: card.querySelector('[data-field="name"]').value,
+                        type: meta.type,
+                        scopeId: card.querySelector('[data-field="scopeId"]')?.value || null,
+                        realityType: card.querySelector('[data-field="realityType"]').value,
+                        timeframe: {
+                            start: card.querySelector('[data-field="start"]').value,
+                            end: card.querySelector('[data-field="end"]').value,
+                            description: card.querySelector('[data-field="description"]').value
+                        }
+                    };
+                    this.rp.storage.saveLorebookMeta(meta.id, newMeta);
+                };
+                card.addEventListener('change', persist);
+                card.querySelector('[data-action="del"]').addEventListener('click', () => {
+                    if (!confirm('delete this lorebook and all its entries?')) return;
+                    this.rp.storage.lorebooks.delete(meta.id);
+                    this.rp.storage.saveLorebooksLocal();
+                    this.rp.storage.deleteLorebookMeta(meta.id);
+                    renderList();
+                });
+                card.querySelector('[data-action="editEntries"]').addEventListener('click', () => {
+                    modal.remove();
+                    this.showLorebookEntryEditor(meta.id, () => this.showLorebookManager());
+                });
+                root.appendChild(card);
+            }
+        };
+        modal.querySelector('#rp-lb-filter').addEventListener('change', renderList);
+        renderList();
+
+        const createLorebook = (type) => {
+            const id = type + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+            this.rp.storage.lorebooks.set(id, []);
+            this.rp.storage.saveLorebooksLocal();
+            this.rp.storage.saveLorebookMeta(id, {
+                name: type + ' lorebook',
+                type,
+                scopeId: null,
+                timeframe: { start: '', end: '', description: '' },
+                realityType: 'fictional'
+            });
+            renderList();
+            showToast?.('lorebook created');
+        };
+        document.getElementById('rp-lb-new-user')?.addEventListener('click', () => createLorebook('user'));
+        document.getElementById('rp-lb-new-character')?.addEventListener('click', () => createLorebook('character'));
+        document.getElementById('rp-lb-new-world')?.addEventListener('click', () => createLorebook('world'));
+    }
+
+    // standalone lorebook entries editor (used for shared lorebooks)
+    showLorebookEntryEditor(lorebookId, onClose) {
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body" style="max-width:760px;">
+                <h3>📖 entries</h3>
+                <div id="rp-lb-entries"></div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-lb-add">+ add entry</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-lb-back">back</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => { modal.remove(); onClose && onClose(); });
+        document.getElementById('rp-lb-back').addEventListener('click', () => { modal.remove(); onClose && onClose(); });
+
+        let entries = (this.rp.storage.getLorebook(lorebookId) || []).map(e => e instanceof LorebookEntry ? e : new LorebookEntry(e));
+        const persist = () => {
+            this.rp.storage.saveLorebook(lorebookId, entries);
+        };
+        const root = modal.querySelector('#rp-lb-entries');
+        const renderEntries = () => {
+            root.innerHTML = '';
+            if (entries.length === 0) {
+                const e = document.createElement('div');
+                e.className = 'rp-empty-desc';
+                e.textContent = 'no entries yet. click + add entry.';
+                root.appendChild(e);
+                return;
+            }
+            entries.forEach((entry, idx) => {
+                const row = document.createElement('div');
+                row.className = 'rp-lore-row';
+                row.innerHTML = `
+                    <div class="rp-lore-row-top">
+                        <input type="text" placeholder="comment / title" value="${this.escapeHtml(entry.comment || '')}" data-field="comment">
+                        <label class="rp-lore-toggle"><input type="checkbox" data-field="enabled" ${entry.enabled !== false ? 'checked' : ''}> enabled</label>
+                        <button type="button" class="rp-action-btn rp-action-delete" data-action="remove">🗑️</button>
+                    </div>
+                    <div class="rp-lore-row-keys">
+                        <input type="text" placeholder="primary keys" value="${this.escapeHtml((entry.keys || []).join(', '))}" data-field="keys">
+                        <input type="text" placeholder="secondary keys" value="${this.escapeHtml((entry.secondaryKeys || []).join(', '))}" data-field="secondaryKeys">
+                    </div>
+                    <textarea rows="3" placeholder="content..." data-field="content">${this.escapeHtml(entry.content || '')}</textarea>`;
+                row.querySelectorAll('[data-field]').forEach(el => {
+                    el.addEventListener('change', () => {
+                        const f = el.dataset.field;
+                        let v = el.type === 'checkbox' ? el.checked : el.value;
+                        if (f === 'keys' || f === 'secondaryKeys') v = v.split(',').map(s => s.trim()).filter(Boolean);
+                        entries[idx][f] = v;
+                        persist();
+                    });
+                });
+                row.querySelector('[data-action="remove"]').addEventListener('click', () => {
+                    entries.splice(idx, 1);
+                    persist();
+                    renderEntries();
+                });
+                root.appendChild(row);
+            });
+        };
+        renderEntries();
+        document.getElementById('rp-lb-add').addEventListener('click', () => {
+            entries.push(new LorebookEntry({ keys: [], content: '', enabled: true }));
+            persist();
+            renderEntries();
         });
     }
 
@@ -4719,6 +6097,10 @@ if (typeof module !== 'undefined' && module.exports) {
         QuickReplySet,
         ExpressionDetector,
         ExtensionManager,
+        MacroEngine,
+        MemoryEntry,
+        MemorySimilarity,
+        SemanticCache,
         RP_STORAGE_KEYS,
         RP_MIGRATION_VERSION
     };
