@@ -4570,11 +4570,13 @@ function initRPModule() {
     console.log('[rp] module initialized');
 }
 
-// auto-init when dom is ready
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initRPModule);
-} else {
-    initRPModule();
+// auto-init when dom is ready (skip in module/test environments without document)
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initRPModule);
+    } else {
+        initRPModule();
+    }
 }
 
 // =====================================================

@@ -10,7 +10,7 @@
     "format": "prettier --write 'script.js' 'server.js'",
     "format:check": "prettier --check 'script.js' 'server.js'",
     "build:css": "npx tailwindcss -i ./styles.tailwind.css -o ./styles.css --minify",
-    "build": "npm run build:css && mkdir -p dist && cp index.html dist/ && cp script.js dist/ && cp styles.css dist/ && cp telemetry.js dist/ && cp llama-offline.js dist/ && cp tools-system.js dist/ && npx cap sync && cp -rf dist/* electron/app/",
+    "build": "npm run build:css && mkdir -p dist && cp index.html dist/ && cp script.js dist/ && cp styles.css dist/ && cp telemetry.js dist/ && cp llama-offline.js dist/ && cp tools-system.js dist/ && cp rp-module.js dist/ && cp rp-extensions.js dist/ && cp rp-styles.css dist/ && npx cap sync && cp -rf dist/* electron/app/",
     "start": "node server.js",
     "android:build": "cd android && ./gradlew assembleDebug",
     "rebuild-all": "bash rebuild-all.sh",

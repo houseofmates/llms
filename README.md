@@ -64,6 +64,49 @@ cd android
 
 configuration for api models lives in the app settings. store your openrouter key, gemini api key, and hugging face token there. no environment files to edit; the app handles it from the ui.
 
+<h2 align="center">rp (roleplay) module</h2>
+
+a sillytavern-flavored roleplay surface lives inside the same app. open the rp card from the homepage. it talks to the nvidia nim api (kimi-k2.6 by default) and stores everything locally, with optional nocobase cloud sync.
+
+**what's in the box**
+
+- **characters** — v3 character cards, png/json import, persona switching, avatar uploads
+- **groups** — multi-character conversations with sequential / round-robin / random turn order, per-character overrides, auto-advance
+- **swipes** — generate alternate replies for any assistant message, cycle through them with ◀ / ▶, ↻ to add another
+- **continue** — extend a truncated assistant message in place (⏩)
+- **summarize** — compress old history into a recap that replaces or appends; optional auto-summarize when context grows past a threshold
+- **quick replies** — global and per-character/per-group reply sets; chips above the chat input
+- **lorebook** — full sillytavern semantics: primary + secondary keys, regex (`/pattern/flags`), constant, selective, position (before / after / system / author's note), order, priority, probability, scan-depth. entries inject when triggered.
+- **expressions** — multiple avatars per character. auto-switches based on detected mood (happy / sad / angry / surprised / scared / thinking / embarrassed / neutral, or your own keywords), or pick manually via the 🎭 button on each message
+- **extensions** — slash commands, ui slots, and chat hooks. drop manifests on `window.rpBundledExtensions` before init. bundled samples: `/roll`, `/clear`, mood toast
+
+**slash commands (bundled)**
+
+- `/roll d20` or `/roll 3d6+2` — dice roller
+- `/clear` — wipe the active chat
+
+**writing an extension**
+
+```js
+window.rpBundledExtensions.push({
+    id: 'me.greeter',
+    name: 'greeter',
+    version: '1.0.0',
+    description: 'adds /wave',
+    permissions: [],     // 'http:request' to enable api.requestHttp
+    install(api) {
+        api.registerSlashCommand('wave', (args) => `*waves at ${args || 'the room'}*`);
+        api.on('chat:beforeSend', (p) => ({ ...p, text: p.text + ' :)' }));
+    }
+});
+```
+
+events available to extensions: `chat:beforeSend`, `chat:afterReceive`, `character:selected`. handlers may mutate and return the payload; the final value is what the rest of the pipeline sees.
+
+**data + migration**
+
+all rp data lives in `localStorage` keys prefixed with `llms_rp_`. on first launch after upgrading, a migration runner backfills new fields (expressions, embedded lorebook, message variants) on existing characters and chats, bumps `llms_rp_migration_version`, and stashes a one-shot backup under `llms_rp_backup_v<n>_<ts>`.
+
 <h1 align="center">license</h1>
 
 [mates license](license)
