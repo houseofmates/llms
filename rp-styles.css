@@ -1230,7 +1230,7 @@
     padding: 0.25rem 0;
     color: #666;
     font-size: 0.75rem;
-    text-transform: uppercase;
+    text-transform: lowercase !important;
     letter-spacing: 0.05em;
     border-top: 1px dashed #222;
 }
@@ -1731,7 +1731,7 @@
     font-size: 0.85rem;
     margin-top: 0.5rem;
     white-space: pre-wrap;
-    word-wrap: break-word;
+    overflow-wrap: break-word;
 }
 
 .rp-custom-macro-row {

@@ -10,7 +10,7 @@
         window.rpBundledExtensions = [];
     }
 
-    // ----- /roll dN  -----
+    // ----- /roll dn -----
     // adds a dice roller slash command, e.g. /roll d20 or /roll 3d6+2
     window.rpBundledExtensions.push({
         id: 'sample.dice',

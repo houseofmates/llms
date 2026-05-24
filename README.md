@@ -4,7 +4,7 @@ llms is a unified interface for all the ai chat services you actually want to us
 
 it runs as a web page, packages as electron builds for desktop, and builds as an android apk through capacitor. one codebase for all three.
 
-<h2 align="center">featurmates license
+<h2 align="center">mates license
 
 copyright (c) 2026 house of mates
 

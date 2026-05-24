@@ -621,7 +621,7 @@ describe('Brave search heuristic + formatting', () => {
     });
 
     test('search returns normalized results on 200', async () => {
-        global.fetch = jest.fn().mockResolvedValue({
+        jest.spyOn(global, 'fetch').mockResolvedValue({
             ok: true,
             json: async () => ({ web: { results: [
                 { title: 't1', url: 'u1', description: '<b>d1</b>' }
