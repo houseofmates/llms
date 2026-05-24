@@ -1453,7 +1453,9 @@ class RPStorage {
         entry.scopeKey = scopeKey;
         const list = this.memories.get(scopeKey) || [];
         // dedupe: if a similar memory exists, bump lastRelevantAt + nudge confidence.
-        const threshold = 0.78;
+        // jaccard threshold is lower than the spec's cosine 0.8 because token-set
+        // overlap tends to score lower than embedding similarity on the same pair.
+        const threshold = 0.6;
         for (const existing of list) {
             if (MemorySimilarity.score(existing.content, entry.content) >= threshold) {
                 existing.lastRelevantAt = new Date().toISOString();

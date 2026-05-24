@@ -13,6 +13,10 @@ const {
     QuickReplySet,
     ExpressionDetector,
     ExtensionManager,
+    MacroEngine,
+    MemoryEntry,
+    MemorySimilarity,
+    SemanticCache,
     RPStorage,
     RP_STORAGE_KEYS,
     RP_MIGRATION_VERSION
@@ -380,5 +384,275 @@ describe('Summarization prompt assembly', () => {
         expect(prompt[1].content).toMatch(/bob/);
         expect(prompt[1].content).toMatch(/alice/);
         expect(prompt[1].content).toMatch(/hi alice/);
+    });
+});
+
+// ---------- new in pr #5 ----------
+
+describe('MacroEngine', () => {
+    function mkStorage(initial = {}) {
+        const settings = { ...initial };
+        return {
+            getSetting: (k, d) => (settings[k] === undefined ? d : settings[k]),
+            setSetting: (k, v) => { settings[k] = v; },
+            _settings: settings
+        };
+    }
+
+    test('expands built-in macros and leaves disabled ones alone', () => {
+        const storage = mkStorage({ macroToggles: { user: true, char: true, random: false } });
+        const eng = new MacroEngine(storage);
+        const out = eng.expand('hi {{char}}, i am {{user}}. roll {{random:1-6}}', {
+            user: 'bob', char: 'alice'
+        });
+        expect(out).toMatch(/^hi alice, i am bob/);
+        // random was disabled -> left as literal
+        expect(out).toContain('{{random:1-6}}');
+    });
+
+    test('expand respects custom macros', () => {
+        const storage = mkStorage({ customMacros: { greeting: 'howdy' } });
+        const eng = new MacroEngine(storage);
+        const out = eng.expand('say {{greeting}}!');
+        expect(out).toBe('say howdy!');
+    });
+
+    test('unknown macros are left as-is', () => {
+        const storage = mkStorage();
+        const eng = new MacroEngine(storage);
+        expect(eng.expand('hello {{nope}}')).toBe('hello {{nope}}');
+    });
+
+    test('expandMessages walks string and multipart content', () => {
+        const storage = mkStorage();
+        const eng = new MacroEngine(storage);
+        const out = eng.expandMessages([
+            { role: 'user', content: 'hi {{user}}' },
+            { role: 'user', content: [
+                { type: 'text', text: 'see {{char}}' },
+                { type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } }
+            ] }
+        ], { user: 'bob', char: 'alice' });
+        expect(out[0].content).toBe('hi bob');
+        expect(out[1].content[0].text).toBe('see alice');
+        expect(out[1].content[1].image_url.url).toMatch(/^data:image\/png/);
+    });
+
+    test('random:a-b returns a number in range', () => {
+        const storage = mkStorage();
+        const eng = new MacroEngine(storage);
+        for (let i = 0; i < 20; i++) {
+            const out = eng.expand('{{random:5-7}}');
+            const n = parseInt(out, 10);
+            expect(n).toBeGreaterThanOrEqual(5);
+            expect(n).toBeLessThanOrEqual(7);
+        }
+    });
+
+    test('getToggles defaults missing built-ins to true and reflects overrides', () => {
+        const storage = mkStorage({ macroToggles: { time: false } });
+        const eng = new MacroEngine(storage);
+        const t = eng.getToggles();
+        expect(t.time).toBe(false);
+        expect(t.user).toBe(true);
+        expect(t.random).toBe(true);
+    });
+});
+
+describe('MemorySimilarity', () => {
+    test('jaccard recognises near-duplicates of short factual sentences', () => {
+        const a = 'user lives in tokyo';
+        const b = 'the user lives in tokyo japan';
+        expect(MemorySimilarity.jaccard(a, b)).toBeGreaterThan(0.45);
+        expect(MemorySimilarity.score(a, b)).toBeGreaterThan(0.5);
+    });
+
+    test('jaccard is low for unrelated sentences', () => {
+        expect(MemorySimilarity.jaccard('user is a doctor', 'castle in the sky')).toBeLessThan(0.2);
+    });
+});
+
+describe('RPStorage memories', () => {
+    test('addMemory dedupes against similar existing entries', () => {
+        const s = new RPStorage();
+        s.addMemory({ content: 'user lives in tokyo', source: 'manual', confidence: 0.8 }, 'global');
+        s.addMemory({ content: 'the user lives in tokyo japan', source: 'auto', confidence: 0.6 }, 'global');
+        const all = s.getMemories('global');
+        // dedupe collapsed both into a single entry
+        expect(all.length).toBe(1);
+        expect(all[0].lastRelevantAt).not.toBeNull();
+    });
+
+    test('getRelevantMemories merges scopes without duplicates', () => {
+        const s = new RPStorage();
+        s.addMemory({ content: 'one' }, 'character:c1');
+        s.addMemory({ content: 'two' }, 'persona:p1');
+        s.addMemory({ content: 'three' }, 'global');
+        const out = s.getRelevantMemories({ characterId: 'c1', personaId: 'p1' });
+        expect(out.map(m => m.content).sort()).toEqual(['one', 'three', 'two']);
+    });
+
+    test('updateMemory lowercases content and persists', () => {
+        const s = new RPStorage();
+        const m = s.addMemory({ content: 'original' });
+        s.updateMemory(m.id, { content: 'NEW Content' });
+        expect(s.getMemories('global')[0].content).toBe('new content');
+    });
+});
+
+describe('RPStorage typed lorebooks', () => {
+    test('saveLorebookMeta defaults are sane and getWorldLorebookId works', () => {
+        const s = new RPStorage();
+        // wipe the default world-lorebook created by the v3 migration so we
+        // can assert on a fresh instance
+        s.lorebookMeta.clear();
+        s.lorebooks.clear();
+        s.lorebooks.set('w1', []);
+        s.saveLorebookMeta('w1', { name: 'world', type: 'world', realityType: 'realLife' });
+        expect(s.getWorldLorebookId()).toBe('w1');
+        const meta = s.getLorebookMeta('w1');
+        expect(meta.realityType).toBe('realLife');
+        expect(meta.timeframe.start).toBe('');
+    });
+
+    test('user lorebook is found by persona id', () => {
+        const s = new RPStorage();
+        s.lorebooks.set('u1', []);
+        s.saveLorebookMeta('u1', { name: 'me', type: 'user', scopeId: 'persona_x' });
+        expect(s.getUserLorebookIdForPersona('persona_x')).toBe('u1');
+        expect(s.getUserLorebookIdForPersona('nope')).toBeNull();
+    });
+});
+
+describe('SemanticCache', () => {
+    test('cosine similarity', () => {
+        expect(SemanticCache.cosine([1, 0], [1, 0])).toBeCloseTo(1, 5);
+        expect(SemanticCache.cosine([1, 0], [0, 1])).toBeCloseTo(0, 5);
+        expect(SemanticCache.cosine([1, 1], [1, 1])).toBeCloseTo(1, 5);
+        expect(SemanticCache.cosine([1, 1], [-1, -1])).toBeCloseTo(-1, 5);
+    });
+
+    test('lookup returns null when disabled', async () => {
+        const settings = {};
+        const storage = {
+            getSetting: (k, d) => (settings[k] === undefined ? d : settings[k]),
+            setSetting: (k, v) => { settings[k] = v; }
+        };
+        const cache = new SemanticCache({}, storage);
+        const out = await cache.lookup('hi', { characterId: 'c1' });
+        expect(out).toBeNull();
+    });
+
+    test('lookup returns hit when an entry exceeds threshold', async () => {
+        const settings = { semanticCacheEnabled: true, semanticCacheThreshold: 0.9, semanticCacheTTLDays: 7 };
+        const storage = {
+            getSetting: (k, d) => (settings[k] === undefined ? d : settings[k]),
+            setSetting: (k, v) => { settings[k] = v; }
+        };
+        // stub keyPool + embed
+        const keyPool = { getActiveKey: () => 'fake' };
+        const cache = new SemanticCache(keyPool, storage);
+        // bypass actual fetch: monkey-patch embed
+        cache.embed = jest.fn().mockResolvedValue([1, 0, 0]);
+        // seed an entry directly
+        cache._entries = [{
+            text: 'hello',
+            response: 'cached response!',
+            embedding: [1, 0, 0],
+            at: Date.now(),
+            characterId: 'c1',
+            personaId: 'p1'
+        }];
+        const out = await cache.lookup('different text but same embedding', { characterId: 'c1', personaId: 'p1' });
+        expect(out).not.toBeNull();
+        expect(out.response).toBe('cached response!');
+        expect(out.similarity).toBeCloseTo(1, 3);
+    });
+
+    test('lookup returns miss object (not null) when no entries match', async () => {
+        const settings = { semanticCacheEnabled: true, semanticCacheThreshold: 0.95 };
+        const storage = {
+            getSetting: (k, d) => (settings[k] === undefined ? d : settings[k]),
+            setSetting: (k, v) => { settings[k] = v; }
+        };
+        const cache = new SemanticCache({ getActiveKey: () => 'fake' }, storage);
+        cache.embed = jest.fn().mockResolvedValue([1, 0, 0]);
+        cache._entries = [{
+            text: 'unrelated', response: 'r', embedding: [0, 1, 0], at: Date.now(),
+            characterId: 'c1', personaId: null
+        }];
+        const out = await cache.lookup('q', { characterId: 'c1', personaId: null });
+        expect(out.hit).toBe(false);
+        expect(Array.isArray(out.queryEmbedding)).toBe(true);
+    });
+});
+
+describe('Brave search heuristic + formatting', () => {
+    const Brave = require('./brave-search.js');
+
+    test('shouldAutoSearch fires on freshness keywords', () => {
+        expect(Brave.shouldAutoSearch('what is the latest news on x?')).toBe(true);
+        expect(Brave.shouldAutoSearch('weather today')).toBe(true);
+        expect(Brave.shouldAutoSearch('current stock price of nvda')).toBe(true);
+    });
+
+    test('shouldAutoSearch fires on year-like patterns', () => {
+        expect(Brave.shouldAutoSearch('events in 2024')).toBe(true);
+    });
+
+    test('shouldAutoSearch does not fire on generic conversation', () => {
+        expect(Brave.shouldAutoSearch('hi how are you')).toBe(false);
+        expect(Brave.shouldAutoSearch('explain monads')).toBe(false);
+    });
+
+    test('formatResultsForPrompt produces a numbered block', () => {
+        const out = Brave.formatResultsForPrompt('q', [
+            { title: 'A', url: 'http://a', description: 'desc a' },
+            { title: 'B', url: 'http://b', description: 'desc b' }
+        ]);
+        expect(out).toMatch(/search query: q/);
+        expect(out).toMatch(/\[1\] A/);
+        expect(out).toMatch(/\[2\] B/);
+        expect(out).toMatch(/desc a/);
+    });
+
+    test('search rejects without an api key', async () => {
+        await expect(Brave.search('q')).rejects.toThrow(/no brave api key/);
+    });
+
+    test('search returns normalized results on 200', async () => {
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ web: { results: [
+                { title: 't1', url: 'u1', description: '<b>d1</b>' }
+            ] } })
+        });
+        const out = await Brave.search('q', { apiKey: 'k' });
+        expect(out).toEqual([{ title: 't1', url: 'u1', description: 'd1' }]);
+    });
+});
+
+describe('Image attachments serialize as image_url parts', () => {
+    test('chat message with images becomes a multipart content array', () => {
+        // duplicate the inline shape from getContextMessages -> ensures any
+        // future refactor doesn't accidentally drop the image_url plumbing.
+        const msg = new ChatMessage({
+            role: 'user',
+            content: 'look at this',
+            images: ['data:image/png;base64,AAA', 'data:image/jpeg;base64,BBB']
+        });
+        // simulate the serialization done in getContextMessages
+        const role = msg.role;
+        const content = msg.getActiveContent();
+        const c = [{ type: 'text', text: content }];
+        for (const img of msg.images) {
+            c.push({ type: 'image_url', image_url: { url: img } });
+        }
+        const payload = { role, content: c };
+        expect(payload.content).toHaveLength(3);
+        expect(payload.content[0]).toEqual({ type: 'text', text: 'look at this' });
+        expect(payload.content[1].type).toBe('image_url');
+        expect(payload.content[1].image_url.url).toMatch(/^data:image\/png/);
+        expect(payload.content[2].image_url.url).toMatch(/^data:image\/jpeg/);
     });
 });

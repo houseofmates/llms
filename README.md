@@ -105,7 +105,84 @@ events available to extensions: `chat:beforeSend`, `chat:afterReceive`, `charact
 
 **data + migration**
 
-all rp data lives in `localStorage` keys prefixed with `llms_rp_`. on first launch after upgrading, a migration runner backfills new fields (expressions, embedded lorebook, message variants) on existing characters and chats, bumps `llms_rp_migration_version`, and stashes a one-shot backup under `llms_rp_backup_v<n>_<ts>`.
+all rp data lives in `localStorage` keys prefixed with `llms_rp_`. on first launch after upgrading, a migration runner backfills new fields (expressions, embedded lorebook, message variants, default world lorebook) on existing characters and chats, bumps `llms_rp_migration_version`, and stashes a one-shot backup under `llms_rp_backup_v<n>_<ts>`.
+
+<h3>multimodal attachments</h3>
+
+- 📎 supports multiple images per message (1 mb each); thumbnails appear in a preview tray with × buttons before send
+- 🎬 experimental video attach: extracts a single frame (~1s in) via canvas and attaches it as an image — kimi has no native video support, so this is the simplest reasonable bridge
+- payload is shaped as the standard openai multimodal `content: [{type:'text'...},{type:'image_url'...}]` and posted directly to `https://integrate.api.nvidia.com/v1/chat/completions`
+
+<h3>macros (🪄)</h3>
+
+insert `{{name}}` placeholders anywhere — system prompts, lorebook content, your own messages — and they're expanded at send time:
+
+| macro | value |
+|---|---|
+| `{{time}}` | local time (configurable 12/24h) |
+| `{{date}}` | local date |
+| `{{datetime}}` | full timestamp |
+| `{{user}}` / `{{char}}` | active persona / character |
+| `{{location}}` | browser geolocation (opt-in) |
+| `{{weather}}` | wttr.in lookup (opt-in, no key needed) |
+| `{{random:1-100}}` | random integer in range |
+| `{{your_custom_var}}` | user-defined macros from the macros modal |
+
+disabled macros remain as literal text. unknown macros are left untouched so you notice typos.
+
+<h3>memories (🧠)</h3>
+
+- side panel listing auto-extracted + manually added memories, scoped per character / persona / global
+- auto-extract runs the kimi model every 4 assistant turns with a json-extraction prompt; results are lowercased and deduped against existing entries via a jaccard+substring similarity score
+- ranked top-N (lock + confidence + relevance to last turn) memories are injected as `[relevant memories]` in the system prompt
+- lock entries you want to keep forever; delete the rest
+
+<h3>typed lorebooks: user / character / world (📚)</h3>
+
+each lorebook now carries:
+
+- `type` — `user` (per-persona), `character`, or `world` (single global)
+- `timeframe` — free-text start/end/description (e.g., "1885" → "1900", "victorian london")
+- `realityType` — `realLife` or `fictional`
+
+at send time, entries from all three sources are merged. when the same primary key set appears in multiple sources, character > user > world wins. the v3 migration auto-creates an empty world lorebook and tags any pre-existing shared lorebooks with default metadata.
+
+<h3>semantic caching (nvidia embeddings)</h3>
+
+opt-in toggle in rp settings. uses `nvidia/llama-nemotron-embed-vl-1b-v2` over the same nvidia nim endpoint:
+
+1. before generating, embed the incoming user message
+2. cosine-match against cached entries for the same (character, persona)
+3. if similarity ≥ threshold (default 0.92), yield the cached response as a synthetic stream and skip the generation call entirely
+4. on a miss, the embedding is reused when caching the new response so we don't pay for it twice
+
+text-only messages are eligible (images bypass the cache cleanly). cache hits surface a `cached` badge next to the character name. configurable ttl + clear button live in settings.
+
+<h2 align="center">aggregator-wide additions</h2>
+
+<h3>mobile tab management</h3>
+
+- long-press (500ms) a tab on touch — or right-click on desktop — to pop an action sheet with **close / cancel**
+- buttons sized 44px+ for fingers; backdrop dismisses on tap
+- drag-to-reorder remains via sortablejs (delay is tuned so the long-press popup doesn't fight with drag detection)
+- friendly tab names: each tab uses `model.name`, with sensible fallbacks for the two custom chat surfaces (`llama-offline` → `gemma 4b`, `rp`/`roleplay` → `kimi k2.6 rp`)
+
+<h3>brave search for local gemma</h3>
+
+- add your brave search api key in the api-keys modal (saved alongside the other keys)
+- 🔍 button appears in the api chat input when the active model is **gemma 4b** — click to arm a one-shot search for the next message
+- "auto" checkbox enables heuristic auto-search (fires when the message mentions "current", "latest", "today", "news", "weather", "price", "stock", or contains a 4-digit year)
+- results are folded into a one-shot `[search results]` system message prepended to the next prompt (chat history stays clean)
+- no logging: queries live only in an in-memory buffer that's cleared by the page lifetime or the clear button
+- failures (missing key, brave rejection, network) fall through to a normal generation — never block the chat
+
+<h2 align="center">testing</h2>
+
+```bash
+npm test          # runs jest across rp-module + tab-utils suites
+```
+
+current coverage: 58 passing unit tests across data models, macros, memory dedup, semantic cache cosine + lookup, brave search heuristic + formatting, lorebook activation, group turn order, extensions api, and tab popup dom shape.
 
 <h1 align="center">license</h1>
 
