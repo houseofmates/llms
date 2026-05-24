@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+*.log
+.agents/
+skills-lock.json
+
+# personal build-time secrets baked in via scripts/bundle-env-keys.js
+.env
+.env.local
+.env.*.local
+rp-keys.bundled.js

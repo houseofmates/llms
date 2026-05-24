@@ -12,8 +12,18 @@ const RP_STORAGE_KEYS = {
     LOREBOOKS: 'llms_rp_lorebooks',
     ACTIVE_PERSONA: 'llms_rp_active_persona',
     API_KEYS: 'llms_rp_api_keys',
-    KEY_POOL_STATE: 'llms_rp_key_pool_state'
+    KEY_POOL_STATE: 'llms_rp_key_pool_state',
+    GROUPS: 'llms_rp_groups',
+    GROUP_CHATS: 'llms_rp_group_chats',
+    QUICK_REPLY_SETS: 'llms_rp_quick_reply_sets',
+    EXTENSIONS: 'llms_rp_extensions',
+    MIGRATION_VERSION: 'llms_rp_migration_version',
+    MEMORIES: 'llms_rp_memories',
+    LOREBOOK_META: 'llms_rp_lorebook_meta'
 };
+
+// current data migration version. bump when models change.
+const RP_MIGRATION_VERSION = 3;
 
 // =====================================================
 // nvidia nim api configuration
@@ -51,6 +61,15 @@ class CharacterCard {
         this.createdAt = data.createdAt || new Date().toISOString();
         this.updatedAt = data.updatedAt || new Date().toISOString();
         this.extensions = data.extensions || {};
+
+        // expressions: array of { name, avatarUrl, triggers }
+        // each expression represents a mood/emotion the character can show
+        this.expressions = Array.isArray(data.expressions) ? data.expressions : [];
+        this.defaultExpression = data.defaultExpression || 'neutral';
+
+        // embedded lorebook entries (sillytavern character_book)
+        // entries may also live in a shared lorebook keyed by lorebookId
+        this.embeddedLorebook = Array.isArray(data.embeddedLorebook) ? data.embeddedLorebook : [];
     }
 
     generateId() {
@@ -138,41 +157,290 @@ class ChatMessage {
         this.personaId = data.personaId || null;
         this.branchId = data.branchId || 'main';
         this.parentMessageId = data.parentMessageId || null;
-        this.variants = data.variants || [];
+        // variants: list of { content, generatedAt, model, temperature }
+        this.variants = Array.isArray(data.variants) ? data.variants : [];
+        // index of currently displayed variant within variants. -1 means use root content.
+        this.activeVariantIndex = typeof data.activeVariantIndex === 'number' ? data.activeVariantIndex : -1;
         this.isEdited = data.isEdited || false;
+        // expression name shown for this message (assistant messages only)
+        this.expression = data.expression || null;
+        // optional summary block (marks a message that replaces a swath of history)
+        this.isSummary = !!data.isSummary;
+        // for group chats: which character actually spoke this assistant turn
+        this.speakerCharacterId = data.speakerCharacterId || null;
     }
 
     generateId() {
         return 'msg_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
     }
+
+    // returns the active text content, accounting for active variant
+    getActiveContent() {
+        if (this.activeVariantIndex >= 0 && this.variants[this.activeVariantIndex]) {
+            return this.variants[this.activeVariantIndex].content;
+        }
+        return this.content;
+    }
+
+    // total number of variants including the original
+    totalVariants() {
+        return 1 + this.variants.length;
+    }
+
+    // active variant number (1-indexed) for ui display
+    activeVariantNumber() {
+        return this.activeVariantIndex < 0 ? 1 : this.activeVariantIndex + 2;
+    }
 }
 
 // =====================================================
-// lorebook entry class
+// lorebook entry class (sillytavern-compatible)
 // =====================================================
 class LorebookEntry {
     constructor(data = {}) {
         this.id = data.id || this.generateId();
-        this.keys = data.keys || [];
+        this.keys = Array.isArray(data.keys) ? data.keys : [];
+        // secondary keys must ALSO match when present (logic: secondary AND any primary)
+        this.secondaryKeys = Array.isArray(data.secondaryKeys || data.keysecondary) ? (data.secondaryKeys || data.keysecondary) : [];
         this.content = data.content || '';
         this.enabled = data.enabled !== false;
-        this.insertionOrder = data.insertionOrder || 0;
-        this.caseSensitive = data.caseSensitive || false;
+        this.insertionOrder = data.insertionOrder ?? data.insertion_order ?? 0;
+        this.caseSensitive = !!(data.caseSensitive || data.case_sensitive);
+        // priority: higher means included first when budget is limited
         this.priority = data.priority || 0;
         this.comment = data.comment || '';
+        // constant entries are always injected, ignoring keys
+        this.constant = !!data.constant;
+        // selective: only match when both primary AND secondary keys match
+        // (default true if secondaryKeys exist to match sillytavern semantics)
+        this.selective = data.selective !== undefined
+            ? !!data.selective
+            : (this.secondaryKeys.length > 0);
+        // position: where to inject relative to chat
+        // 'before' = prepended to system prompt, 'after' = appended after system,
+        // 'system' = standalone system message, 'an' = author's note (after chat)
+        this.position = data.position || 'before';
+        // ordering: lower numbers inject earlier (deterministic), priority breaks ties
+        this.order = data.order ?? data.insertionOrder ?? 0;
+        // depth: how many recent messages to scan for matches (0 = unlimited)
+        this.scanDepth = data.scanDepth || 0;
+        // probability percent (0-100) that this entry triggers when matched
+        this.probability = typeof data.probability === 'number' ? data.probability : 100;
     }
 
     generateId() {
         return 'lore_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
     }
 
+    // returns true if any key (or regex /pattern/flags) matches the given text
+    matchesAny(keyList, text) {
+        const searchText = this.caseSensitive ? text : text.toLowerCase();
+        for (const rawKey of keyList) {
+            if (!rawKey) continue;
+            const key = String(rawKey).trim();
+            // regex syntax /pattern/flags
+            const regexMatch = key.match(/^\/(.+)\/([gimsuy]*)$/);
+            if (regexMatch) {
+                try {
+                    const re = new RegExp(regexMatch[1], regexMatch[2]);
+                    if (re.test(searchText)) return true;
+                } catch (e) {
+                    // fall through to substring match
+                }
+                continue;
+            }
+            const searchKey = this.caseSensitive ? key : key.toLowerCase();
+            if (searchText.includes(searchKey)) return true;
+        }
+        return false;
+    }
+
+    // returns true if this entry should be activated for the given context text
     matches(text) {
         if (!this.enabled) return false;
-        const searchText = this.caseSensitive ? text : text.toLowerCase();
-        return this.keys.some(key => {
-            const searchKey = this.caseSensitive ? key : key.toLowerCase();
-            return searchText.includes(searchKey);
+        if (this.constant) return true;
+        const hasPrimary = this.matchesAny(this.keys, text);
+        if (!hasPrimary) return false;
+        if (this.selective && this.secondaryKeys.length > 0) {
+            return this.matchesAny(this.secondaryKeys, text);
+        }
+        return true;
+    }
+}
+
+// =====================================================
+// lorebook activation engine
+// =====================================================
+class LorebookActivationEngine {
+    // recent messages: array of objects with at least { role, content }
+    // entries: array of LorebookEntry instances
+    // returns: { systemBlocks: { before, after, system, an }, activated: [entries] }
+    static activate(entries, recentMessages, opts = {}) {
+        if (!Array.isArray(entries) || entries.length === 0) {
+            return { before: '', after: '', system: '', an: '', activated: [] };
+        }
+
+        const tokenBudget = opts.tokenBudget || 1500; // approx, characters/4
+        const activated = [];
+
+        for (const entry of entries) {
+            if (!entry || !entry.enabled) continue;
+            // determine scan window
+            const depth = entry.scanDepth && entry.scanDepth > 0
+                ? entry.scanDepth
+                : recentMessages.length;
+            const scanText = recentMessages
+                .slice(-depth)
+                .map(m => (typeof m.content === 'string' ? m.content : ''))
+                .join(' ');
+
+            const isMatch = entry.constant || entry.matches(scanText);
+            if (!isMatch) continue;
+
+            // probability gate
+            if (entry.probability < 100) {
+                if (Math.random() * 100 > entry.probability) continue;
+            }
+
+            activated.push(entry);
+        }
+
+        // sort by priority desc, then order asc
+        activated.sort((a, b) => {
+            if (b.priority !== a.priority) return b.priority - a.priority;
+            return (a.order || 0) - (b.order || 0);
         });
+
+        // enforce a soft character budget
+        const groups = { before: [], after: [], system: [], an: [] };
+        let used = 0;
+        const cap = tokenBudget * 4;
+        for (const entry of activated) {
+            const cost = (entry.content || '').length;
+            if (used + cost > cap) continue;
+            used += cost;
+            const pos = ['before', 'after', 'system', 'an'].includes(entry.position) ? entry.position : 'before';
+            groups[pos].push(entry.content);
+        }
+
+        return {
+            before: groups.before.join('\n\n'),
+            after: groups.after.join('\n\n'),
+            system: groups.system.join('\n\n'),
+            an: groups.an.join('\n\n'),
+            activated
+        };
+    }
+}
+
+// =====================================================
+// group (multi-character) class
+// =====================================================
+class Group {
+    constructor(data = {}) {
+        this.id = data.id || this.generateId();
+        this.name = data.name || 'untitled group';
+        this.description = data.description || '';
+        this.avatarUrl = data.avatarUrl || '';
+        this.characterIds = Array.isArray(data.characterIds) ? data.characterIds : [];
+        this.settings = Object.assign({
+            turnOrder: 'sequential', // 'sequential' | 'roundRobin' | 'random'
+            autoAdvance: true,
+            responseDelayMs: 0,
+            systemPromptTemplate: ''
+        }, data.settings || {});
+        // per-character overrides: { [characterId]: { temperature, systemPromptOverride } }
+        this.characterOverrides = data.characterOverrides || {};
+        this.createdAt = data.createdAt || new Date().toISOString();
+        this.updatedAt = data.updatedAt || new Date().toISOString();
+    }
+
+    generateId() {
+        return 'group_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+    }
+}
+
+// =====================================================
+// quick reply / quick reply set
+// =====================================================
+class QuickReply {
+    constructor(data = {}) {
+        this.id = data.id || ('qr_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6));
+        this.label = data.label || '';
+        this.text = data.text || '';
+        this.sendImmediately = !!data.sendImmediately;
+    }
+}
+
+class QuickReplySet {
+    constructor(data = {}) {
+        this.id = data.id || ('qrset_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6));
+        this.name = data.name || 'untitled set';
+        // scope: 'global' | 'character' | 'group'
+        this.scope = data.scope || 'global';
+        this.scopeId = data.scopeId || null;
+        this.replies = (data.replies || []).map(r => new QuickReply(r));
+        this.enabled = data.enabled !== false;
+    }
+}
+
+// =====================================================
+// expression detector
+// detects the closest matching expression for a piece of text
+// =====================================================
+class ExpressionDetector {
+    // default keyword maps for common moods
+    static DEFAULT_TRIGGERS = {
+        happy: ['smile', 'smiled', 'happy', 'laugh', 'giggl', 'grin', 'cheer', 'delight', 'joy'],
+        sad: ['sad', 'cry', 'cried', 'tear', 'weep', 'sob', 'sorrow', 'lonely', 'gloom'],
+        angry: ['angry', 'furious', 'rage', 'mad', 'growl', 'snarl', 'shout', 'yell', 'glare'],
+        surprised: ['surprised', 'shock', 'gasp', 'startle', 'astonish', 'amazed', 'wow'],
+        scared: ['afraid', 'scared', 'fear', 'tremble', 'shiver', 'panic', 'terrif'],
+        thinking: ['think', 'wonder', 'ponder', 'consider', 'hmm', 'puzzled'],
+        embarrassed: ['blush', 'blushed', 'embarrass', 'flustered', 'shy', 'awkward'],
+        neutral: []
+    };
+
+    static detect(character, text) {
+        if (!character || !Array.isArray(character.expressions) || character.expressions.length === 0) {
+            return null;
+        }
+        if (!text) return character.defaultExpression || null;
+        const lower = text.toLowerCase();
+        let best = null;
+        let bestScore = 0;
+
+        for (const exp of character.expressions) {
+            const triggers = (exp.triggers && exp.triggers.length > 0)
+                ? exp.triggers
+                : (ExpressionDetector.DEFAULT_TRIGGERS[exp.name] || []);
+            let score = 0;
+            for (const t of triggers) {
+                if (!t) continue;
+                const key = String(t).toLowerCase();
+                if (lower.includes(key)) score += 1;
+            }
+            if (score > bestScore) {
+                best = exp.name;
+                bestScore = score;
+            }
+        }
+
+        return best || character.defaultExpression || (character.expressions[0] && character.expressions[0].name) || null;
+    }
+
+    // resolves an expression name to a usable avatar url, falling back to default/main
+    static getAvatarUrl(character, expressionName) {
+        if (!character) return '';
+        if (expressionName && Array.isArray(character.expressions)) {
+            const found = character.expressions.find(e => e.name === expressionName);
+            if (found && found.avatarUrl) return found.avatarUrl;
+        }
+        if (character.defaultExpression) {
+            const def = (character.expressions || []).find(e => e.name === character.defaultExpression);
+            if (def && def.avatarUrl) return def.avatarUrl;
+        }
+        return character.avatarUrl || '';
     }
 }
 
@@ -524,6 +792,12 @@ class RPStorage {
         this.chats = new Map();
         this.lorebooks = new Map();
         this.settings = {};
+        this.groups = new Map();
+        this.groupChats = new Map();
+        this.quickReplySets = new Map();
+        this.extensionsState = {}; // { extensionId: { enabled, settings } }
+        this.memories = new Map(); // scopeKey -> MemoryEntry[]
+        this.lorebookMeta = new Map(); // lorebookId -> { name, type, scopeId, timeframe, realityType }
         this.nocobase = new RPNocoBaseSync();
         this.isLoaded = false;
         this.loadAll();
@@ -536,6 +810,19 @@ class RPStorage {
         this.loadChatsLocal();
         this.loadLorebooksLocal();
         this.loadSettingsLocal();
+        this.loadGroupsLocal();
+        this.loadGroupChatsLocal();
+        this.loadQuickReplySetsLocal();
+        this.loadExtensionsLocal();
+        this.loadMemoriesLocal();
+        this.loadLorebookMetaLocal();
+
+        // run any pending data migrations
+        try {
+            this.runMigrations();
+        } catch (e) {
+            console.warn('[rp] migration failed:', e);
+        }
 
         // then try to sync from nocobase (if configured)
         if (this.nocobase.isConfigured()) {
@@ -543,6 +830,96 @@ class RPStorage {
         }
 
         this.isLoaded = true;
+    }
+
+    // ---- migrations ----
+    // ensures any older data on disk gets the new fields with safe defaults.
+    runMigrations() {
+        let currentVersion = 0;
+        try {
+            currentVersion = parseInt(localStorage.getItem(RP_STORAGE_KEYS.MIGRATION_VERSION) || '0', 10) || 0;
+        } catch (e) {
+            currentVersion = 0;
+        }
+        if (currentVersion >= RP_MIGRATION_VERSION) return;
+
+        // back up any existing rp data before migrating
+        try {
+            const backupKey = 'llms_rp_backup_v' + currentVersion + '_' + Date.now();
+            const backup = {};
+            for (const k of Object.values(RP_STORAGE_KEYS)) {
+                const v = localStorage.getItem(k);
+                if (v !== null) backup[k] = v;
+            }
+            // only write a backup if we actually have data
+            if (Object.keys(backup).length > 0) {
+                try {
+                    localStorage.setItem(backupKey, JSON.stringify(backup));
+                } catch (e) {
+                    // backup may exceed quota - safe to skip
+                }
+            }
+        } catch (e) {
+            // non-fatal
+        }
+
+        // v1: ensure characters have expressions/defaultExpression
+        // v2: ensure messages have variants array + activeVariantIndex; ensure groups/quickReplySets exist
+        for (const [id, char] of this.characters) {
+            if (!Array.isArray(char.expressions)) char.expressions = [];
+            if (!char.defaultExpression) char.defaultExpression = 'neutral';
+            if (!Array.isArray(char.embeddedLorebook)) char.embeddedLorebook = [];
+        }
+        this.saveCharactersLocal();
+
+        for (const [cid, chat] of this.chats) {
+            if (!chat || !Array.isArray(chat.messages)) continue;
+            for (const msg of chat.messages) {
+                if (!Array.isArray(msg.variants)) msg.variants = [];
+                if (typeof msg.activeVariantIndex !== 'number') msg.activeVariantIndex = -1;
+            }
+        }
+        this.saveChatsLocal();
+
+        // v3: ensure a default world lorebook exists and tag existing character
+        // lorebooks with a meta record so they show up in the typed lorebook ui.
+        if (currentVersion < 3) {
+            if (!this.getWorldLorebookId()) {
+                const worldId = 'world_' + Date.now().toString(36);
+                this.lorebooks.set(worldId, []);
+                this.saveLorebooksLocal();
+                this.saveLorebookMeta(worldId, {
+                    name: 'world',
+                    type: 'world',
+                    scopeId: null,
+                    timeframe: { start: '', end: '', description: '' },
+                    realityType: 'fictional'
+                });
+            }
+            // backfill character lorebooks with default meta
+            for (const [lid] of this.lorebooks) {
+                if (this.getLorebookMeta(lid)) continue;
+                // try to find a character that points at it
+                let scopeId = null;
+                for (const [cid, char] of this.characters) {
+                    if (char.lorebookId === lid) { scopeId = cid; break; }
+                }
+                this.saveLorebookMeta(lid, {
+                    name: 'lorebook',
+                    type: scopeId ? 'character' : 'character',
+                    scopeId,
+                    timeframe: { start: '', end: '', description: '' },
+                    realityType: 'fictional'
+                });
+            }
+        }
+
+        try {
+            localStorage.setItem(RP_STORAGE_KEYS.MIGRATION_VERSION, String(RP_MIGRATION_VERSION));
+        } catch (e) {
+            // non-fatal
+        }
+        console.log('[rp] migrations applied through version', RP_MIGRATION_VERSION);
     }
 
     async syncFromNocoBase() {
@@ -707,6 +1084,119 @@ class RPStorage {
         }
     }
 
+    loadGroupsLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.GROUPS) || '[]');
+            this.groups = new Map(data.map(g => [g.id, new Group(g)]));
+        } catch (e) {
+            console.warn('[rp] failed to load groups locally:', e);
+            this.groups = new Map();
+        }
+    }
+
+    saveGroupsLocal() {
+        try {
+            const data = Array.from(this.groups.values());
+            localStorage.setItem(RP_STORAGE_KEYS.GROUPS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save groups locally:', e);
+        }
+    }
+
+    loadGroupChatsLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.GROUP_CHATS) || '{}');
+            this.groupChats = new Map(Object.entries(data));
+        } catch (e) {
+            console.warn('[rp] failed to load group chats locally:', e);
+            this.groupChats = new Map();
+        }
+    }
+
+    saveGroupChatsLocal() {
+        try {
+            const data = Object.fromEntries(this.groupChats);
+            localStorage.setItem(RP_STORAGE_KEYS.GROUP_CHATS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save group chats locally:', e);
+        }
+    }
+
+    loadQuickReplySetsLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.QUICK_REPLY_SETS) || '[]');
+            this.quickReplySets = new Map(data.map(s => [s.id, new QuickReplySet(s)]));
+        } catch (e) {
+            console.warn('[rp] failed to load quick reply sets locally:', e);
+            this.quickReplySets = new Map();
+        }
+    }
+
+    saveQuickReplySetsLocal() {
+        try {
+            const data = Array.from(this.quickReplySets.values());
+            localStorage.setItem(RP_STORAGE_KEYS.QUICK_REPLY_SETS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save quick reply sets locally:', e);
+        }
+    }
+
+    loadExtensionsLocal() {
+        try {
+            this.extensionsState = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.EXTENSIONS) || '{}');
+        } catch (e) {
+            this.extensionsState = {};
+        }
+    }
+
+    saveExtensionsLocal() {
+        try {
+            localStorage.setItem(RP_STORAGE_KEYS.EXTENSIONS, JSON.stringify(this.extensionsState));
+        } catch (e) {
+            console.error('[rp] failed to save extensions locally:', e);
+        }
+    }
+
+    loadMemoriesLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.MEMORIES) || '{}');
+            this.memories = new Map(Object.entries(data).map(([scope, arr]) => [
+                scope,
+                (arr || []).map(m => new MemoryEntry(m))
+            ]));
+        } catch (e) {
+            console.warn('[rp] failed to load memories locally:', e);
+            this.memories = new Map();
+        }
+    }
+
+    saveMemoriesLocal() {
+        try {
+            const obj = {};
+            for (const [k, v] of this.memories) obj[k] = v;
+            localStorage.setItem(RP_STORAGE_KEYS.MEMORIES, JSON.stringify(obj));
+        } catch (e) {
+            console.error('[rp] failed to save memories locally:', e);
+        }
+    }
+
+    loadLorebookMetaLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.LOREBOOK_META) || '{}');
+            this.lorebookMeta = new Map(Object.entries(data));
+        } catch (e) {
+            this.lorebookMeta = new Map();
+        }
+    }
+
+    saveLorebookMetaLocal() {
+        try {
+            localStorage.setItem(RP_STORAGE_KEYS.LOREBOOK_META, JSON.stringify(Object.fromEntries(this.lorebookMeta)));
+        } catch (e) {
+            console.error('[rp] failed to save lorebook meta locally:', e);
+        }
+    }
+
     // ---- public api (saves to both local and cloud) ----
 
     getCharacter(id) {
@@ -848,6 +1338,198 @@ class RPStorage {
         this.settings[key] = value;
         this.saveSettingsLocal();
         this.nocobase.saveRecord('settings', 'rp_settings', this.settings);
+    }
+
+    // ---- groups ----
+    getAllGroups() {
+        return Array.from(this.groups.values());
+    }
+
+    getGroup(id) {
+        return this.groups.get(id);
+    }
+
+    saveGroup(group) {
+        group.updatedAt = new Date().toISOString();
+        this.groups.set(group.id, group);
+        this.saveGroupsLocal();
+        this.nocobase.saveRecord('group', group.id, group);
+        return group;
+    }
+
+    deleteGroup(id) {
+        this.groups.delete(id);
+        this.saveGroupsLocal();
+        this.nocobase.deleteRecord(id, 'group');
+        // also delete group's chat history
+        this.groupChats.delete(id);
+        this.saveGroupChatsLocal();
+        this.nocobase.deleteRecord(id, 'groupChat');
+    }
+
+    getGroupChat(groupId) {
+        return this.groupChats.get(groupId) || { messages: [] };
+    }
+
+    saveGroupChat(groupId, chatData) {
+        this.groupChats.set(groupId, chatData);
+        this.saveGroupChatsLocal();
+        this.nocobase.saveRecord('groupChat', groupId, { id: groupId, ...chatData });
+    }
+
+    clearGroupChat(groupId) {
+        this.groupChats.set(groupId, { messages: [] });
+        this.saveGroupChatsLocal();
+        this.nocobase.saveRecord('groupChat', groupId, { id: groupId, messages: [] });
+    }
+
+    // ---- quick reply sets ----
+    getAllQuickReplySets() {
+        return Array.from(this.quickReplySets.values());
+    }
+
+    getQuickReplySetsForScope(scope, scopeId = null) {
+        // returns all global sets plus any matching the scope+id
+        return this.getAllQuickReplySets().filter(s => {
+            if (!s.enabled) return false;
+            if (s.scope === 'global') return true;
+            return s.scope === scope && s.scopeId === scopeId;
+        });
+    }
+
+    saveQuickReplySet(set) {
+        if (!(set instanceof QuickReplySet)) set = new QuickReplySet(set);
+        this.quickReplySets.set(set.id, set);
+        this.saveQuickReplySetsLocal();
+        this.nocobase.saveRecord('quickReplySet', set.id, set);
+        return set;
+    }
+
+    deleteQuickReplySet(id) {
+        this.quickReplySets.delete(id);
+        this.saveQuickReplySetsLocal();
+        this.nocobase.deleteRecord(id, 'quickReplySet');
+    }
+
+    // ---- extensions ----
+    getExtensionState(id) {
+        return this.extensionsState[id] || { enabled: false, settings: {} };
+    }
+
+    setExtensionState(id, state) {
+        this.extensionsState[id] = Object.assign({}, this.extensionsState[id] || {}, state);
+        this.saveExtensionsLocal();
+    }
+
+    getAllExtensionStates() {
+        return Object.assign({}, this.extensionsState);
+    }
+
+    // ---- memories ----
+    getMemories(scopeKey = 'global') {
+        return this.memories.get(scopeKey) || [];
+    }
+
+    // returns all memories that may be relevant for the given character + persona.
+    // gathers from character-scoped, persona-scoped, and global scopes.
+    getRelevantMemories({ characterId = null, personaId = null } = {}) {
+        const out = [];
+        const seen = new Set();
+        const add = (list) => {
+            for (const m of (list || [])) {
+                if (seen.has(m.id)) continue;
+                seen.add(m.id);
+                out.push(m);
+            }
+        };
+        if (characterId) add(this.getMemories('character:' + characterId));
+        if (personaId) add(this.getMemories('persona:' + personaId));
+        add(this.getMemories('global'));
+        return out;
+    }
+
+    addMemory(entry, scopeKey = 'global') {
+        if (!(entry instanceof MemoryEntry)) entry = new MemoryEntry(entry);
+        entry.scopeKey = scopeKey;
+        const list = this.memories.get(scopeKey) || [];
+        // dedupe: if a similar memory exists, bump lastRelevantAt + nudge confidence.
+        // jaccard threshold is lower than the spec's cosine 0.8 because token-set
+        // overlap tends to score lower than embedding similarity on the same pair.
+        const threshold = 0.6;
+        for (const existing of list) {
+            if (MemorySimilarity.score(existing.content, entry.content) >= threshold) {
+                existing.lastRelevantAt = new Date().toISOString();
+                existing.confidence = Math.min(1, ((existing.confidence || 0.5) + entry.confidence) / 2 + 0.05);
+                this.memories.set(scopeKey, list);
+                this.saveMemoriesLocal();
+                return existing;
+            }
+        }
+        list.push(entry);
+        this.memories.set(scopeKey, list);
+        this.saveMemoriesLocal();
+        return entry;
+    }
+
+    updateMemory(id, patch, scopeKey = 'global') {
+        const list = this.memories.get(scopeKey) || [];
+        const idx = list.findIndex(m => m.id === id);
+        if (idx === -1) return null;
+        Object.assign(list[idx], patch);
+        if (typeof list[idx].content === 'string') list[idx].content = list[idx].content.toLowerCase();
+        this.memories.set(scopeKey, list);
+        this.saveMemoriesLocal();
+        return list[idx];
+    }
+
+    deleteMemory(id, scopeKey = 'global') {
+        const list = this.memories.get(scopeKey) || [];
+        const next = list.filter(m => m.id !== id);
+        this.memories.set(scopeKey, next);
+        this.saveMemoriesLocal();
+    }
+
+    markMemoryRelevant(id, scopeKey) {
+        return this.updateMemory(id, { lastRelevantAt: new Date().toISOString() }, scopeKey);
+    }
+
+    // ---- lorebook metadata (type / timeframe / realityType) ----
+    getLorebookMeta(id) {
+        return this.lorebookMeta.get(id) || null;
+    }
+
+    getAllLorebookMeta() {
+        return Array.from(this.lorebookMeta.entries()).map(([id, meta]) => ({ id, ...meta }));
+    }
+
+    saveLorebookMeta(id, meta) {
+        this.lorebookMeta.set(id, Object.assign({
+            name: '', type: 'character', scopeId: null,
+            timeframe: { start: '', end: '', description: '' },
+            realityType: 'fictional'
+        }, meta || {}));
+        this.saveLorebookMetaLocal();
+    }
+
+    deleteLorebookMeta(id) {
+        this.lorebookMeta.delete(id);
+        this.saveLorebookMetaLocal();
+    }
+
+    // user lorebook for a given persona (if any)
+    getUserLorebookIdForPersona(personaId) {
+        for (const [id, meta] of this.lorebookMeta) {
+            if (meta.type === 'user' && meta.scopeId === personaId) return id;
+        }
+        return null;
+    }
+
+    // single global world lorebook (returns the first one tagged world)
+    getWorldLorebookId() {
+        for (const [id, meta] of this.lorebookMeta) {
+            if (meta.type === 'world') return id;
+        }
+        return null;
     }
 
     // force sync to cloud
@@ -1021,21 +1703,53 @@ class RPModule {
         this.storage = new RPStorage();
         this.keyPool = new ApiKeyPool();
         this.apiClient = new NvidiaAPIClient(this.keyPool);
+        this.macros = new MacroEngine(this.storage);
+        this.semanticCache = new SemanticCache(this.keyPool, this.storage);
         this.currentCharacter = null;
         this.currentPersona = null;
+        this.currentGroup = null;
+        this.groupChatHistory = [];
         this.isActive = false;
         this.chatHistory = [];
         this.streamController = null;
 
         // load api keys from storage
         this.loadApiKeys();
+
+        // warm macro context (geolocation + weather are opt-in)
+        if (this.storage.getSetting('macroLocationAuto', false)) {
+            this.macros.refreshLocation().then(() => {
+                if (this.storage.getSetting('macroWeatherAuto', false)) this.macros.refreshWeather();
+            });
+        }
+    }
+
+    // returns the bundled nvidia key string (or '') from window.rpBundledKeys.
+    // this file is built from .env on the user's personal machine (see
+    // scripts/bundle-env-keys.js) and is always present in dist/ - either with
+    // a value, or as an empty stub for public builds.
+    getBundledNvidiaKey() {
+        try {
+            if (typeof window === 'undefined') return '';
+            const k = window.rpBundledKeys && window.rpBundledKeys.nvidia;
+            return (typeof k === 'string' && k.trim()) ? k.trim() : '';
+        } catch (e) {
+            return '';
+        }
     }
 
     loadApiKeys() {
         try {
-            const keys = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
-            if (keys.nvidia) {
-                this.keyPool.setKeys(keys.nvidia);
+            const stored = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
+            // bundled keys ALWAYS win when present - this is the .env / build-time
+            // pool the maintainer set on their personal machine.
+            const bundled = this.getBundledNvidiaKey();
+            if (bundled) {
+                this.keyPool.setKeys(bundled);
+                return;
+            }
+            if (stored.nvidia) {
+                this.keyPool.setKeys(stored.nvidia);
             }
         } catch (e) {
             console.warn('[rp] failed to load api keys:', e);
@@ -1045,7 +1759,12 @@ class RPModule {
     saveApiKeys(keys) {
         try {
             localStorage.setItem(RP_STORAGE_KEYS.API_KEYS, JSON.stringify(keys));
-            if (keys.nvidia) {
+            // bundled keys still take precedence if present; UI-supplied keys
+            // are stored but only activated when no bundled key exists.
+            const bundled = this.getBundledNvidiaKey();
+            if (bundled) {
+                this.keyPool.setKeys(bundled);
+            } else if (keys.nvidia) {
                 this.keyPool.setKeys(keys.nvidia);
             }
         } catch (e) {
@@ -1055,7 +1774,14 @@ class RPModule {
 
     getApiKeys() {
         try {
-            return JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
+            const stored = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
+            // expose the bundled key as the effective nvidia key so chat sends
+            // don't error with "no api key configured" when only .env is set.
+            const bundled = this.getBundledNvidiaKey();
+            if (bundled) {
+                return Object.assign({}, stored, { nvidia: bundled, _bundled: true });
+            }
+            return stored;
         } catch (e) {
             return {};
         }
@@ -1115,14 +1841,36 @@ class RPModule {
         return character;
     }
 
-    getContextMessages() {
-        if (!this.currentCharacter) return [];
+    // builds the context messages for a given character + history.
+    // when speakerCharacter is provided (group chat) it is used in place of currentCharacter.
+    // when speakerOverride is provided (group chat) it may carry per-character overrides.
+    getContextMessages(opts = {}) {
+        const character = opts.character || this.currentCharacter;
+        if (!character) return [];
 
-        const character = this.currentCharacter;
-        const persona = this.currentPersona;
+        const persona = opts.persona || this.currentPersona;
+        const history = Array.isArray(opts.history) ? opts.history : this.chatHistory;
+        const limit = typeof opts.historyLimit === 'number' ? opts.historyLimit : 20;
+        const groupSystemPrompt = opts.groupSystemPrompt || '';
+        const groupRoster = Array.isArray(opts.groupRoster) ? opts.groupRoster : null;
+        const speakerOverride = opts.speakerOverride || null;
 
         // build system prompt
-        let systemPrompt = character.systemPrompt || '';
+        let systemPrompt = (speakerOverride && speakerOverride.systemPromptOverride)
+            ? speakerOverride.systemPromptOverride
+            : (character.systemPrompt || '');
+
+        if (groupSystemPrompt) {
+            systemPrompt = groupSystemPrompt + '\n\n' + systemPrompt;
+        }
+
+        if (groupRoster && groupRoster.length > 1) {
+            const others = groupRoster
+                .filter(c => c.id !== character.id)
+                .map(c => `- ${c.name}${c.description ? ': ' + c.description.split('\n')[0] : ''}`)
+                .join('\n');
+            systemPrompt += `\n\n[group roleplay]\nyou are ${character.name}. only respond as ${character.name}.\nother participants:\n${others}`;
+        }
 
         if (character.description) {
             systemPrompt += `\n\n[character description]\n${character.description}`;
@@ -1140,12 +1888,85 @@ class RPModule {
             systemPrompt += `\n\n[example dialogue]\n${character.mesExample}`;
         }
 
-        // add lorebook entries
+        // collect lorebook entries from multiple sources, in priority order:
+        //  character > user persona > world
+        // each entry is tagged with __source so duplicate keys can be resolved.
+        const lorebookEntries = [];
+        const pushEntry = (e, source) => {
+            const inst = e instanceof LorebookEntry ? e : new LorebookEntry(e);
+            inst.__source = source;
+            lorebookEntries.push(inst);
+        };
+
+        if (Array.isArray(character.embeddedLorebook) && character.embeddedLorebook.length > 0) {
+            for (const e of character.embeddedLorebook) pushEntry(e, 'character');
+        }
         if (character.lorebookId) {
-            const recentText = this.chatHistory.slice(-5).map(m => m.content).join(' ');
-            const loreEntries = this.storage.getMatchingLoreEntries(character.lorebookId, recentText);
-            if (loreEntries.length > 0) {
-                systemPrompt += '\n\n[world info]\n' + loreEntries.map(e => e.content).join('\n');
+            const shared = this.storage.getLorebook(character.lorebookId) || [];
+            for (const e of shared) pushEntry(e, 'character');
+        }
+        // user persona lorebook
+        if (persona?.id) {
+            const userLid = this.storage.getUserLorebookIdForPersona?.(persona.id);
+            if (userLid) {
+                for (const e of (this.storage.getLorebook(userLid) || [])) pushEntry(e, 'user');
+            }
+        }
+        // world lorebook (single global)
+        const worldLid = this.storage.getWorldLorebookId?.();
+        if (worldLid) {
+            for (const e of (this.storage.getLorebook(worldLid) || [])) pushEntry(e, 'world');
+        }
+
+        // dedupe entries that share the same primary key set, keeping the
+        // highest-priority source (character > user > world). this is the
+        // simplest interpretation of the conflict-resolution rule in the spec.
+        const sourceWeight = { character: 3, user: 2, world: 1 };
+        const seenKey = new Map(); // joined-keys -> entry
+        const dedupedEntries = [];
+        for (const e of lorebookEntries) {
+            const k = (e.keys || []).slice().sort().join('||').toLowerCase();
+            if (!k) { dedupedEntries.push(e); continue; }
+            const prev = seenKey.get(k);
+            if (!prev) { seenKey.set(k, e); dedupedEntries.push(e); continue; }
+            // resolve conflict
+            if ((sourceWeight[e.__source] || 0) > (sourceWeight[prev.__source] || 0)) {
+                const idx = dedupedEntries.indexOf(prev);
+                if (idx !== -1) dedupedEntries[idx] = e;
+                seenKey.set(k, e);
+            }
+        }
+
+        let authorsNote = '';
+        if (dedupedEntries.length > 0) {
+            const recentMsgs = history.slice(-Math.max(5, opts.loreScanWindow || 8))
+                .map(m => ({ role: m.role, content: (m.getActiveContent ? m.getActiveContent() : m.content) || '' }));
+            const result = LorebookActivationEngine.activate(dedupedEntries, recentMsgs, { tokenBudget: 1500 });
+            if (result.before) systemPrompt = result.before + '\n\n' + systemPrompt;
+            if (result.after) systemPrompt += '\n\n[world info]\n' + result.after;
+            if (result.system) systemPrompt += '\n\n' + result.system;
+            if (result.an) authorsNote = result.an;
+        }
+
+        // memories: inject the most-recent / highest-confidence ones as a system note.
+        const memoryEnabled = this.storage.getSetting('memoryEnabled', true);
+        if (memoryEnabled && this.storage.getRelevantMemories) {
+            const mems = this.storage.getRelevantMemories({
+                characterId: character.id,
+                personaId: persona?.id || null
+            });
+            if (mems.length > 0) {
+                // pick last assistant + last user message text as a relevance probe
+                const probe = history.slice(-3).map(m => (m.getActiveContent ? m.getActiveContent() : m.content) || '').join(' ').toLowerCase();
+                const scored = mems.map(m => ({
+                    m,
+                    s: (m.locked ? 0.5 : 0) + (m.confidence || 0.5) * 0.3 + MemorySimilarity.jaccard(probe, m.content) * 0.5
+                }));
+                scored.sort((a, b) => b.s - a.s);
+                const top = scored.slice(0, this.storage.getSetting('memoryInjectionLimit', 8));
+                if (top.length > 0) {
+                    systemPrompt += '\n\n[relevant memories]\n' + top.map(t => '- ' + t.m.content).join('\n');
+                }
             }
         }
 
@@ -1157,28 +1978,47 @@ class RPModule {
             { role: 'system', content: systemPrompt.trim() }
         ];
 
-        // add chat history (last 20 messages for context window)
-        const recentMessages = this.chatHistory.slice(-20);
-        for (const msg of recentMessages) {
-            const role = msg.role === 'assistant' ? 'assistant' : 'user';
+        // include chat history within limit
+        const recent = limit > 0 ? history.slice(-limit) : history.slice();
+        for (const msg of recent) {
+            const role = msg.role === 'assistant' ? 'assistant' : (msg.role === 'system' ? 'system' : 'user');
+            const content = typeof msg.getActiveContent === 'function' ? msg.getActiveContent() : msg.content;
 
-            // handle multimodal messages
-            if (msg.images && msg.images.length > 0) {
-                const content = [
-                    { type: 'text', text: msg.content }
-                ];
-                for (const img of msg.images) {
-                    content.push({
-                        type: 'image_url',
-                        image_url: { url: img }
-                    });
+            // for group chats, prefix assistant messages with the speaker's name
+            // so models can keep track of who said what
+            let prefixedContent = content;
+            if (groupRoster && groupRoster.length > 1 && role === 'assistant' && msg.speakerCharacterId) {
+                const speaker = groupRoster.find(c => c.id === msg.speakerCharacterId);
+                if (speaker && !content.startsWith(speaker.name + ':')) {
+                    prefixedContent = `${speaker.name}: ${content}`;
                 }
-                messages.push({ role, content });
+            }
+
+            if (msg.images && msg.images.length > 0) {
+                const c = [{ type: 'text', text: prefixedContent }];
+                for (const img of msg.images) {
+                    c.push({ type: 'image_url', image_url: { url: img } });
+                }
+                messages.push({ role, content: c });
             } else {
-                messages.push({ role, content: msg.content });
+                messages.push({ role, content: prefixedContent });
             }
         }
 
+        // author's note goes after the recent messages as a system nudge
+        if (authorsNote) {
+            messages.push({ role: 'system', content: '[author\'s note]\n' + authorsNote });
+        }
+
+        // expand macros across every string in the final messages array.
+        // user toggles control which macros actually fire.
+        if (this.macros) {
+            const context = {
+                user: persona?.name || 'user',
+                char: character.name || 'character'
+            };
+            return this.macros.expandMessages(messages, context);
+        }
         return messages;
     }
 
@@ -1192,11 +2032,17 @@ class RPModule {
             throw new Error('nvidia nim api key not configured. go to rp settings to add your key.');
         }
 
+        // allow extensions to mutate the outgoing user message
+        let payload = { text, images };
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            payload = window.rpExtensions.emit('chat:beforeSend', payload) || payload;
+        }
+
         // create user message
         const userMessage = new ChatMessage({
             role: 'user',
-            content: text,
-            images: images,
+            content: payload.text,
+            images: payload.images || [],
             characterId: this.currentCharacter.id,
             personaId: this.currentPersona?.id
         });
@@ -1204,32 +2050,502 @@ class RPModule {
         this.chatHistory.push(userMessage);
         this.storage.addMessage(this.currentCharacter.id, userMessage);
 
+        // semantic cache lookup (only for text-only messages - skip when images are
+        // attached because the cache is text-based today).
+        let cacheLookup = null;
+        if (this.semanticCache && this.semanticCache.isEnabled() && (!payload.images || payload.images.length === 0)) {
+            try {
+                cacheLookup = await this.semanticCache.lookup(payload.text, {
+                    characterId: this.currentCharacter.id,
+                    personaId: this.currentPersona?.id || null
+                });
+                if (cacheLookup && cacheLookup.response) {
+                    // hit: return a synthetic stream that emits the cached response
+                    const cached = cacheLookup.response;
+                    const sim = cacheLookup.similarity;
+                    return {
+                        userMessage,
+                        cacheHit: true,
+                        similarity: sim,
+                        stream: (async function* () { yield cached; })()
+                    };
+                }
+            } catch (e) {
+                // cache failures must never block generation
+                console.warn('[rp] semantic cache lookup error:', e.message);
+            }
+        }
+
         // get context and send to api
         const contextMessages = this.getContextMessages();
+        const temperature = this.storage.getSetting('temperature', 0.8);
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
 
         return {
             userMessage,
-            stream: this.apiClient.streamMessage(contextMessages, {
-                temperature: this.storage.getSetting('temperature', 0.8),
-                maxTokens: this.storage.getSetting('maxTokens', 2048)
-            })
+            cacheHit: false,
+            // remember the precomputed embedding so commit can reuse it
+            _cachePrecomputedEmbedding: cacheLookup?.queryEmbedding || null,
+            _cacheText: payload.text,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens })
         };
+    }
+
+    // ---- memory: auto-extraction ----
+    // calls the llm to pull short factual statements out of the recent chat and
+    // stores them via storage.addMemory (which handles dedupe).
+    async extractMemories({ scopeKey = null } = {}) {
+        const keys = this.getApiKeys();
+        if (!keys.nvidia) return [];
+        if (!this.currentCharacter && !this.currentGroup) return [];
+
+        const history = this.currentGroup ? this.groupChatHistory : this.chatHistory;
+        if (!history || history.length < 2) return [];
+
+        // sample last 12 messages
+        const sample = history.slice(-12).map(m => {
+            const role = m.role === 'assistant' ? 'assistant' : (m.role === 'user' ? 'user' : 'system');
+            const text = m.getActiveContent ? m.getActiveContent() : m.content;
+            return `${role}: ${text}`;
+        }).join('\n');
+
+        const prompt = [
+            { role: 'system', content:
+                'you are a memory extraction system. from the conversation below, extract short, ' +
+                'lowercase statements that represent important lasting information (user preferences, ' +
+                'character backstory, plot points, locations, relationships). ignore small talk and ' +
+                'transient details. return ONLY a json array of strings, each string a memory entry ' +
+                'in lowercase. if there are none, return []. do not add commentary.'
+            },
+            { role: 'user', content: 'conversation:\n' + sample + '\n\njson:' }
+        ];
+
+        let raw;
+        try {
+            raw = await this.apiClient.sendMessage(prompt, {
+                temperature: 0.2,
+                maxTokens: 400,
+                stream: false
+            });
+        } catch (e) {
+            console.warn('[rp] memory extraction failed:', e.message);
+            return [];
+        }
+
+        // attempt to parse as JSON; fall back to splitting lines that look like memories.
+        let arr = [];
+        try {
+            const trimmed = (raw || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+            const start = trimmed.indexOf('[');
+            const end = trimmed.lastIndexOf(']');
+            const slice = start !== -1 && end !== -1 ? trimmed.slice(start, end + 1) : trimmed;
+            arr = JSON.parse(slice);
+            if (!Array.isArray(arr)) arr = [];
+        } catch (e) {
+            arr = (raw || '').split('\n')
+                .map(s => s.replace(/^[\s\-\*"\d.\)]+/, '').replace(/[",]+$/g, '').trim())
+                .filter(s => s.length > 4 && s.length < 200);
+        }
+
+        const targetScope = scopeKey || ('character:' + (this.currentCharacter?.id || this.currentGroup?.id || 'global'));
+        const added = [];
+        for (const text of arr) {
+            if (typeof text !== 'string') continue;
+            const lc = text.trim().toLowerCase();
+            if (!lc) continue;
+            const entry = this.storage.addMemory({
+                content: lc,
+                source: 'auto',
+                confidence: 0.65
+            }, targetScope);
+            added.push(entry);
+        }
+        return added;
+    }
+
+    // call after each assistant turn (best-effort, fire and forget)
+    maybeExtractMemoriesAsync() {
+        if (!this.storage.getSetting('autoMemoryEnabled', false)) return;
+        // throttle: at most every 4 assistant turns
+        const counter = (this._memTurnCounter || 0) + 1;
+        this._memTurnCounter = counter;
+        if (counter % 4 !== 0) return;
+        this.extractMemories().catch(() => {});
+    }
+
+    // ---- semantic cache commit hook ----
+    // called by the ui after an assistant message has been fully streamed in
+    async cacheLastAssistantResponse(meta) {
+        if (!this.semanticCache || !this.semanticCache.isEnabled()) return;
+        if (!meta || !meta.text || !meta.response) return;
+        try {
+            await this.semanticCache.store(meta.text, meta.response, {
+                characterId: this.currentCharacter?.id || null,
+                personaId: this.currentPersona?.id || null
+            }, meta.embedding || null);
+        } catch (e) {
+            // ignore
+        }
     }
 
     saveAssistantMessage(content) {
         if (!this.currentCharacter) return null;
 
+        // detect expression from content for the active character
+        let expression = null;
+        try {
+            expression = ExpressionDetector.detect(this.currentCharacter, content);
+        } catch (e) {
+            // non-fatal
+        }
+
         const assistantMessage = new ChatMessage({
             role: 'assistant',
             content: content,
             characterId: this.currentCharacter.id,
-            personaId: this.currentPersona?.id
+            personaId: this.currentPersona?.id,
+            expression
         });
+
+        // allow extensions to react/mutate
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            const mutated = window.rpExtensions.emit('chat:afterReceive', { message: assistantMessage });
+            if (mutated && mutated.message) {
+                Object.assign(assistantMessage, mutated.message);
+            }
+        }
 
         this.chatHistory.push(assistantMessage);
         this.storage.addMessage(this.currentCharacter.id, assistantMessage);
 
         return assistantMessage;
+    }
+
+    // ---- swipes (alternate variants) ----
+    // generate a new variant for the assistant message at messageIndex.
+    // returns a stream + the target message reference. caller is responsible
+    // for collecting the streamed text and calling commitSwipe with the result.
+    async generateSwipe(messageIndex) {
+        if (!this.currentCharacter) throw new Error('no character selected');
+        const msg = this.chatHistory[messageIndex];
+        if (!msg || msg.role !== 'assistant') {
+            throw new Error('can only swipe assistant messages');
+        }
+
+        // build context from history up to (but not including) the target message
+        const historyBefore = this.chatHistory.slice(0, messageIndex);
+        const contextMessages = this.getContextMessages({ history: historyBefore });
+
+        const temperature = this.storage.getSetting('temperature', 0.8);
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
+
+        return {
+            message: msg,
+            messageIndex,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens }),
+            temperature
+        };
+    }
+
+    // store the new variant on the message and make it active
+    commitSwipe(messageIndex, content, meta = {}) {
+        const msg = this.chatHistory[messageIndex];
+        if (!msg) return null;
+        msg.variants.push({
+            content,
+            generatedAt: new Date().toISOString(),
+            model: NVIDIA_NIM_CONFIG.model,
+            temperature: meta.temperature
+        });
+        msg.activeVariantIndex = msg.variants.length - 1;
+        // re-detect expression for the active variant
+        try {
+            msg.expression = ExpressionDetector.detect(this.currentCharacter, content) || msg.expression;
+        } catch (e) {}
+        this.persistCurrentChat();
+        return msg;
+    }
+
+    setActiveVariant(messageIndex, variantIndex) {
+        const msg = this.chatHistory[messageIndex];
+        if (!msg) return null;
+        if (variantIndex < -1 || variantIndex >= msg.variants.length) return null;
+        msg.activeVariantIndex = variantIndex;
+        const active = msg.getActiveContent();
+        try {
+            msg.expression = ExpressionDetector.detect(this.currentCharacter, active) || msg.expression;
+        } catch (e) {}
+        this.persistCurrentChat();
+        return msg;
+    }
+
+    // ---- continue generation ----
+    // continues the assistant message at messageIndex by appending more text.
+    async generateContinuation(messageIndex) {
+        if (!this.currentCharacter) throw new Error('no character selected');
+        const msg = this.chatHistory[messageIndex];
+        if (!msg || msg.role !== 'assistant') {
+            throw new Error('can only continue assistant messages');
+        }
+
+        // include the partial assistant message at the end so the model continues from there
+        const historyUpToAndIncluding = this.chatHistory.slice(0, messageIndex + 1);
+        const contextMessages = this.getContextMessages({ history: historyUpToAndIncluding });
+
+        // append a brief nudge instructing the model to continue without a preamble
+        contextMessages.push({
+            role: 'system',
+            content: 'continue the previous message naturally without restating it. do not add a preamble or quote it; just continue from where it ended.'
+        });
+
+        const temperature = Math.min(0.8, this.storage.getSetting('temperature', 0.8));
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
+        return {
+            message: msg,
+            messageIndex,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens })
+        };
+    }
+
+    commitContinuation(messageIndex, additionalContent) {
+        const msg = this.chatHistory[messageIndex];
+        if (!msg) return null;
+        // separate with a space if the existing content doesn't end with whitespace
+        const joiner = /\s$/.test(msg.getActiveContent()) ? '' : ' ';
+        if (msg.activeVariantIndex >= 0 && msg.variants[msg.activeVariantIndex]) {
+            msg.variants[msg.activeVariantIndex].content += joiner + additionalContent;
+        } else {
+            msg.content += joiner + additionalContent;
+        }
+        msg.isEdited = true;
+        this.persistCurrentChat();
+        return msg;
+    }
+
+    // ---- summarization ----
+    // generates a summary text for the given messages.
+    async summarizeMessages(messages) {
+        const keys = this.getApiKeys();
+        if (!keys.nvidia) {
+            throw new Error('nvidia nim api key not configured.');
+        }
+
+        const charName = this.currentCharacter?.name || 'character';
+        const personaName = this.currentPersona?.name || 'user';
+
+        const historyText = messages
+            .map(m => {
+                const speaker = m.role === 'assistant' ? charName : personaName;
+                const text = typeof m.getActiveContent === 'function' ? m.getActiveContent() : m.content;
+                return `${speaker}: ${text}`;
+            })
+            .join('\n');
+
+        const prompt = [
+            { role: 'system', content: 'you are a helpful assistant that summarizes roleplay conversations.' },
+            { role: 'user', content:
+                `below is the chat history between ${personaName} and ${charName}.\n` +
+                'produce a concise summary (max 200 tokens) that captures the key events, emotional state, relationships, and any unresolved plot points.\n' +
+                'write in third person present tense.\n\n' +
+                'chat history:\n' + historyText + '\n\nsummary:' }
+        ];
+
+        // non-streaming for summary
+        const result = await this.apiClient.sendMessage(prompt, {
+            temperature: 0.5,
+            maxTokens: 400,
+            stream: false
+        });
+        return (result || '').toString().trim();
+    }
+
+    // replace the first n messages with a single system "recap" message
+    applySummaryReplace(summaryText, replaceCount) {
+        if (!this.currentCharacter) return;
+        const recap = new ChatMessage({
+            role: 'system',
+            content: '[recap]\n' + summaryText,
+            characterId: this.currentCharacter.id,
+            isSummary: true
+        });
+        this.chatHistory.splice(0, Math.max(1, replaceCount), recap);
+        this.persistCurrentChat();
+    }
+
+    // append summary as its own system message without removing history
+    applySummaryAppend(summaryText) {
+        if (!this.currentCharacter) return;
+        const recap = new ChatMessage({
+            role: 'system',
+            content: '[recap]\n' + summaryText,
+            characterId: this.currentCharacter.id,
+            isSummary: true
+        });
+        this.chatHistory.push(recap);
+        this.storage.addMessage(this.currentCharacter.id, recap);
+    }
+
+    // rough token estimate (chars/4) for the active chat
+    estimateChatTokens() {
+        let chars = 0;
+        for (const m of this.chatHistory) {
+            chars += (typeof m.getActiveContent === 'function' ? m.getActiveContent() : (m.content || '')).length;
+        }
+        return Math.ceil(chars / 4);
+    }
+
+    // persist the active chat after any in-place mutation
+    persistCurrentChat() {
+        if (!this.currentCharacter) return;
+        this.storage.saveChat(this.currentCharacter.id, {
+            messages: this.chatHistory,
+            branches: ['main']
+        });
+    }
+
+    // ---- group chats ----
+    createGroup(data) {
+        const group = new Group(data);
+        return this.storage.saveGroup(group);
+    }
+
+    updateGroup(id, patch) {
+        const group = this.storage.getGroup(id);
+        if (!group) return null;
+        Object.assign(group, patch);
+        return this.storage.saveGroup(group);
+    }
+
+    deleteGroup(id) {
+        this.storage.deleteGroup(id);
+        if (this.currentGroup?.id === id) {
+            this.currentGroup = null;
+            this.groupChatHistory = [];
+        }
+    }
+
+    selectGroup(groupId) {
+        const group = this.storage.getGroup(groupId);
+        if (!group) return null;
+        this.currentGroup = group;
+        this.currentCharacter = null; // mutually exclusive view
+        this.currentPersona = this.storage.getActivePersona();
+        const chat = this.storage.getGroupChat(groupId);
+        this.groupChatHistory = (chat.messages || []).map(m => new ChatMessage(m));
+        return group;
+    }
+
+    persistCurrentGroupChat() {
+        if (!this.currentGroup) return;
+        this.storage.saveGroupChat(this.currentGroup.id, {
+            messages: this.groupChatHistory
+        });
+    }
+
+    // returns the list of characters in the group (resolved + ordered)
+    getGroupRoster(group = this.currentGroup) {
+        if (!group) return [];
+        const roster = [];
+        for (const id of group.characterIds) {
+            const c = this.storage.getCharacter(id);
+            if (c) roster.push(c);
+        }
+        return roster;
+    }
+
+    // determines the next speaker(s) for a group turn.
+    decideGroupSpeakers(group, lastSpeakerId = null) {
+        const roster = this.getGroupRoster(group);
+        if (roster.length === 0) return [];
+        const order = group.settings?.turnOrder || 'sequential';
+        if (order === 'random') {
+            const idx = Math.floor(Math.random() * roster.length);
+            return [roster[idx]];
+        }
+        if (order === 'roundRobin' && lastSpeakerId) {
+            const lastIdx = roster.findIndex(c => c.id === lastSpeakerId);
+            const next = roster[(lastIdx + 1) % roster.length];
+            return [next];
+        }
+        // sequential: return all in order (auto-advance mode will iterate)
+        return roster;
+    }
+
+    // sends a user message into a group and returns one stream per character.
+    // caller drives the streams sequentially and calls commitGroupAssistantMessage for each.
+    async sendGroupMessage(text, images = []) {
+        if (!this.currentGroup) throw new Error('no group selected');
+        const keys = this.getApiKeys();
+        if (!keys.nvidia) {
+            throw new Error('nvidia nim api key not configured. go to rp settings to add your key.');
+        }
+
+        let payload = { text, images };
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            payload = window.rpExtensions.emit('chat:beforeSend', payload) || payload;
+        }
+
+        const userMessage = new ChatMessage({
+            role: 'user',
+            content: payload.text,
+            images: payload.images || [],
+            personaId: this.currentPersona?.id
+        });
+        this.groupChatHistory.push(userMessage);
+        this.persistCurrentGroupChat();
+        return { userMessage };
+    }
+
+    // generates one assistant response for the given speaker character within the group.
+    async generateGroupTurn(character) {
+        if (!this.currentGroup || !character) throw new Error('invalid group turn');
+        const roster = this.getGroupRoster(this.currentGroup);
+        const speakerOverride = this.currentGroup.characterOverrides?.[character.id] || null;
+        const groupSystemPrompt = this.currentGroup.settings?.systemPromptTemplate || '';
+
+        const contextMessages = this.getContextMessages({
+            character,
+            persona: this.currentPersona,
+            history: this.groupChatHistory,
+            groupSystemPrompt,
+            groupRoster: roster,
+            speakerOverride
+        });
+
+        const temperature = speakerOverride?.temperature ?? this.storage.getSetting('temperature', 0.8);
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
+        return {
+            character,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens })
+        };
+    }
+
+    commitGroupAssistantMessage(character, content) {
+        let expression = null;
+        try { expression = ExpressionDetector.detect(character, content); } catch (e) {}
+
+        const msg = new ChatMessage({
+            role: 'assistant',
+            content,
+            characterId: character.id,
+            speakerCharacterId: character.id,
+            personaId: this.currentPersona?.id,
+            expression
+        });
+
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            window.rpExtensions.emit('chat:afterReceive', { message: msg });
+        }
+
+        this.groupChatHistory.push(msg);
+        this.persistCurrentGroupChat();
+        return msg;
+    }
+
+    clearGroupChat() {
+        if (!this.currentGroup) return;
+        this.groupChatHistory = [];
+        this.storage.clearGroupChat(this.currentGroup.id);
     }
 
     clearChat() {
@@ -1381,7 +2697,7 @@ class RPModule {
         return JSON.stringify(v3Data, null, 2);
     }
 
-    // quick replies
+    // legacy: flat quick replies stored as a setting. retained for backward compatibility.
     getQuickReplies() {
         return this.storage.getSetting('quickReplies', [
             { id: 'continue', label: 'continue...', text: 'please continue.' },
@@ -1392,6 +2708,613 @@ class RPModule {
 
     saveQuickReplies(replies) {
         this.storage.setSetting('quickReplies', replies);
+    }
+
+    // returns the merged set of quick replies for the current chat scope.
+    // includes global sets, plus any character/group-scoped sets, plus legacy.
+    getActiveQuickReplies() {
+        const out = [];
+        // legacy first (these are global)
+        for (const r of this.getQuickReplies()) {
+            out.push({ id: r.id || ('legacy_' + Math.random().toString(36).slice(2, 7)), label: r.label, text: r.text, sendImmediately: false });
+        }
+        let scope = 'global';
+        let scopeId = null;
+        if (this.currentGroup) { scope = 'group'; scopeId = this.currentGroup.id; }
+        else if (this.currentCharacter) { scope = 'character'; scopeId = this.currentCharacter.id; }
+        const sets = this.storage.getQuickReplySetsForScope(scope, scopeId);
+        for (const s of sets) {
+            for (const r of s.replies) {
+                out.push({ id: r.id, label: r.label, text: r.text, sendImmediately: !!r.sendImmediately, setName: s.name });
+            }
+        }
+        return out;
+    }
+}
+
+// =====================================================
+// macro engine
+// =====================================================
+// expands {{...}} placeholders in any string (system prompts, user messages,
+// lorebook content, character definitions). each built-in macro has a default
+// enabled state which can be toggled via storage.setSetting('macroToggles', {...}).
+// custom user macros live under setting 'customMacros' as { name: value } pairs.
+class MacroEngine {
+    static BUILT_INS = ['time', 'date', 'datetime', 'location', 'user', 'char', 'weather', 'random'];
+
+    constructor(storage) {
+        this.storage = storage;
+        this._geoCache = null; // { lat, lon, label, at }
+        this._weatherCache = null; // { text, at }
+    }
+
+    // returns the merged toggle map. if a macro isn't present it defaults to true.
+    getToggles() {
+        const stored = this.storage?.getSetting?.('macroToggles', null) || {};
+        const map = {};
+        for (const name of MacroEngine.BUILT_INS) map[name] = stored[name] !== false;
+        // any custom macros are listed too, default-on
+        const custom = this.storage?.getSetting?.('customMacros', {}) || {};
+        for (const k of Object.keys(custom)) {
+            if (stored[k] === undefined) map[k] = true;
+            else map[k] = !!stored[k];
+        }
+        return map;
+    }
+
+    setToggle(name, value) {
+        const map = this.storage?.getSetting?.('macroToggles', {}) || {};
+        map[name] = !!value;
+        this.storage?.setSetting?.('macroToggles', map);
+    }
+
+    setCustomMacros(obj) {
+        this.storage?.setSetting?.('customMacros', obj || {});
+    }
+
+    getCustomMacros() {
+        return this.storage?.getSetting?.('customMacros', {}) || {};
+    }
+
+    // expand `text` using the supplied context. opts.location/weather overrides
+    // skip the corresponding async lookups. context = { user, char }.
+    expand(text, context = {}, opts = {}) {
+        if (!text || typeof text !== 'string') return text;
+        const toggles = this.getToggles();
+        const custom = this.getCustomMacros();
+
+        return text.replace(/\{\{\s*([a-zA-Z_][\w]*)(?:\s*:\s*([^}]+))?\s*\}\}/g, (match, name, arg) => {
+            const key = name.toLowerCase();
+            // disabled macros are left untouched (per spec: leave as is)
+            if (toggles[key] === false) return match;
+
+            switch (key) {
+                case 'time': {
+                    const fmt = this.storage?.getSetting?.('macroTimeFormat', '24h');
+                    return new Date().toLocaleTimeString(undefined, {
+                        hour12: fmt === '12h',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                }
+                case 'date':
+                    return new Date().toLocaleDateString();
+                case 'datetime':
+                    return new Date().toLocaleString();
+                case 'location':
+                    if (opts.location !== undefined) return opts.location;
+                    return (this._geoCache?.label) || this.storage?.getSetting?.('macroLocation', 'unknown location');
+                case 'user':
+                    return context.user || 'user';
+                case 'char':
+                    return context.char || 'character';
+                case 'weather':
+                    if (opts.weather !== undefined) return opts.weather;
+                    return (this._weatherCache?.text) || 'weather unavailable';
+                case 'random': {
+                    const range = (arg || '1-100').split('-').map(s => parseInt(s.trim(), 10));
+                    if (range.length !== 2 || isNaN(range[0]) || isNaN(range[1])) return match;
+                    const [a, b] = [Math.min(range[0], range[1]), Math.max(range[0], range[1])];
+                    return String(Math.floor(Math.random() * (b - a + 1)) + a);
+                }
+                default:
+                    // custom macro lookup
+                    if (Object.prototype.hasOwnProperty.call(custom, key)) {
+                        return String(custom[key] ?? '');
+                    }
+                    // unrecognized macros are left in place (helps users notice typos)
+                    return match;
+            }
+        });
+    }
+
+    // expands every string in an openai-style messages array (used right before send).
+    expandMessages(messages, context = {}, opts = {}) {
+        if (!Array.isArray(messages)) return messages;
+        return messages.map(m => {
+            if (typeof m.content === 'string') {
+                return { ...m, content: this.expand(m.content, context, opts) };
+            }
+            if (Array.isArray(m.content)) {
+                return {
+                    ...m,
+                    content: m.content.map(part => {
+                        if (part && part.type === 'text' && typeof part.text === 'string') {
+                            return { ...part, text: this.expand(part.text, context, opts) };
+                        }
+                        return part;
+                    })
+                };
+            }
+            return m;
+        });
+    }
+
+    // attempt to populate location via browser geolocation. cached for 10 minutes.
+    async refreshLocation() {
+        if (!navigator.geolocation) return null;
+        if (this._geoCache && (Date.now() - this._geoCache.at) < 10 * 60 * 1000) return this._geoCache;
+        return new Promise((resolve) => {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const { latitude, longitude } = pos.coords;
+                    this._geoCache = {
+                        lat: latitude,
+                        lon: longitude,
+                        label: `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
+                        at: Date.now()
+                    };
+                    resolve(this._geoCache);
+                },
+                () => resolve(null),
+                { timeout: 4000, maximumAge: 10 * 60 * 1000 }
+            );
+        });
+    }
+
+    // best-effort weather via wttr.in (no key needed). cached 30 minutes.
+    async refreshWeather() {
+        if (this._weatherCache && (Date.now() - this._weatherCache.at) < 30 * 60 * 1000) return this._weatherCache;
+        try {
+            let url = 'https://wttr.in/?format=%C+%t';
+            if (this._geoCache) url = `https://wttr.in/${this._geoCache.lat},${this._geoCache.lon}?format=%C+%t`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error('weather fetch failed: ' + res.status);
+            const text = (await res.text()).trim();
+            this._weatherCache = { text, at: Date.now() };
+            return this._weatherCache;
+        } catch (e) {
+            return null;
+        }
+    }
+}
+
+// =====================================================
+// memory system (auto + manual)
+// =====================================================
+class MemoryEntry {
+    constructor(data = {}) {
+        this.id = data.id || ('mem_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6));
+        this.content = (data.content || '').toLowerCase(); // always lowercase per spec
+        this.source = data.source === 'manual' ? 'manual' : 'auto';
+        this.createdAt = data.createdAt || new Date().toISOString();
+        this.lastRelevantAt = data.lastRelevantAt || null;
+        this.confidence = typeof data.confidence === 'number' ? data.confidence : 0.6;
+        this.tags = Array.isArray(data.tags) ? data.tags : [];
+        this.locked = !!data.locked;
+        this.scopeKey = data.scopeKey || 'global'; // 'character:<id>' | 'persona:<id>' | 'global'
+    }
+}
+
+// simple text-similarity helper used to dedupe memories.
+class MemorySimilarity {
+    static tokenize(str) {
+        return (str || '').toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').split(/\s+/).filter(Boolean);
+    }
+
+    // jaccard similarity over token sets; cheap and surprisingly effective for
+    // short factual sentences.
+    static jaccard(a, b) {
+        const ta = new Set(MemorySimilarity.tokenize(a));
+        const tb = new Set(MemorySimilarity.tokenize(b));
+        if (ta.size === 0 && tb.size === 0) return 1;
+        let inter = 0;
+        for (const t of ta) if (tb.has(t)) inter++;
+        const union = ta.size + tb.size - inter;
+        return union === 0 ? 0 : inter / union;
+    }
+
+    // higher of jaccard or substring ratio - keeps "user lives in tokyo" and
+    // "the user lives in tokyo, japan" looking similar.
+    static score(a, b) {
+        return Math.max(
+            MemorySimilarity.jaccard(a, b),
+            MemorySimilarity._substringRatio(a, b)
+        );
+    }
+
+    static _substringRatio(a, b) {
+        if (!a || !b) return 0;
+        const longer = a.length >= b.length ? a : b;
+        const shorter = a.length < b.length ? a : b;
+        return longer.toLowerCase().includes(shorter.toLowerCase()) ? shorter.length / longer.length : 0;
+    }
+}
+
+// =====================================================
+// semantic cache (nvidia embeddings)
+// =====================================================
+// stores embeddings + responses for prior user messages keyed by character.
+// on a new query we embed the text, compute cosine similarity vs cached entries
+// for the same (character, persona) bucket, and return the cached response if
+// the best match exceeds the threshold. cleared when ttl elapses or the
+// character's lorebook content changes.
+class SemanticCache {
+    static EMBED_ENDPOINT = 'https://integrate.api.nvidia.com/v1/embeddings';
+    static EMBED_MODEL = 'nvidia/llama-nemotron-embed-vl-1b-v2';
+    static STORAGE_KEY = 'llms_rp_semantic_cache';
+
+    constructor(keyPool, storage) {
+        this.keyPool = keyPool;
+        this.storage = storage;
+        this._entries = null; // lazy-loaded
+    }
+
+    _load() {
+        if (this._entries) return this._entries;
+        try {
+            const raw = localStorage.getItem(SemanticCache.STORAGE_KEY) || '[]';
+            this._entries = JSON.parse(raw);
+        } catch (e) {
+            this._entries = [];
+        }
+        return this._entries;
+    }
+
+    _save() {
+        try {
+            // cap cache to 500 entries
+            if (this._entries.length > 500) {
+                this._entries.sort((a, b) => b.at - a.at);
+                this._entries = this._entries.slice(0, 500);
+            }
+            localStorage.setItem(SemanticCache.STORAGE_KEY, JSON.stringify(this._entries));
+        } catch (e) {
+            console.warn('[rp] semantic cache save failed:', e);
+        }
+    }
+
+    isEnabled() {
+        return !!this.storage?.getSetting?.('semanticCacheEnabled', false);
+    }
+
+    getThreshold() {
+        return this.storage?.getSetting?.('semanticCacheThreshold', 0.92);
+    }
+
+    getTTLms() {
+        // default 7 days, configurable
+        const days = this.storage?.getSetting?.('semanticCacheTTLDays', 7);
+        return Math.max(1, Math.min(60, days)) * 24 * 60 * 60 * 1000;
+    }
+
+    // generate an embedding via nvidia. throws if no key configured.
+    async embed(text) {
+        const apiKey = this.keyPool?.getActiveKey?.();
+        if (!apiKey) throw new Error('no nvidia api key configured for embeddings');
+        const res = await fetch(SemanticCache.EMBED_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: SemanticCache.EMBED_MODEL,
+                input: [text],
+                input_type: 'query',
+                encoding_format: 'float',
+                truncate: 'END'
+            })
+        });
+        if (!res.ok) {
+            const txt = await res.text().catch(() => '');
+            throw new Error('embedding request failed: ' + res.status + ' ' + txt.substring(0, 200));
+        }
+        const data = await res.json();
+        const vec = data?.data?.[0]?.embedding;
+        if (!Array.isArray(vec)) throw new Error('embedding response missing vector');
+        return vec;
+    }
+
+    static cosine(a, b) {
+        if (!a || !b || a.length !== b.length) return 0;
+        let dot = 0, na = 0, nb = 0;
+        for (let i = 0; i < a.length; i++) {
+            dot += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        const denom = Math.sqrt(na) * Math.sqrt(nb);
+        return denom === 0 ? 0 : dot / denom;
+    }
+
+    // returns the cached response object or null. cached entries are filtered
+    // by characterId + personaId so personas don't leak into each other.
+    async lookup(text, scope) {
+        if (!this.isEnabled()) return null;
+        if (!text || typeof text !== 'string' || text.trim().length === 0) return null;
+
+        const entries = this._load();
+        const ttl = this.getTTLms();
+        const now = Date.now();
+        const fresh = entries.filter(e =>
+            (now - (e.at || 0)) < ttl &&
+            e.characterId === (scope?.characterId || null) &&
+            e.personaId === (scope?.personaId || null)
+        );
+
+        // skip the embedding round-trip entirely if there's nothing to compare to
+        if (fresh.length === 0) return null;
+
+        let embedding;
+        try {
+            embedding = await this.embed(text);
+        } catch (e) {
+            // never block the chat on cache problems
+            console.warn('[rp] semantic cache lookup failed:', e.message);
+            return null;
+        }
+
+        const threshold = this.getThreshold();
+        let best = null;
+        let bestScore = 0;
+        for (const e of fresh) {
+            const score = SemanticCache.cosine(embedding, e.embedding);
+            if (score > bestScore) {
+                bestScore = score;
+                best = e;
+            }
+        }
+        if (best && bestScore >= threshold) {
+            return {
+                response: best.response,
+                similarity: bestScore,
+                cachedAt: best.at,
+                queryEmbedding: embedding
+            };
+        }
+        return { hit: false, queryEmbedding: embedding };
+    }
+
+    // store a (text, response) pair under the (character, persona) bucket.
+    // if a precomputed embedding is supplied it's reused to avoid a second call.
+    async store(text, response, scope, precomputedEmbedding = null) {
+        if (!this.isEnabled()) return;
+        try {
+            const embedding = precomputedEmbedding || await this.embed(text);
+            const entries = this._load();
+            entries.push({
+                text,
+                response,
+                embedding,
+                at: Date.now(),
+                characterId: scope?.characterId || null,
+                personaId: scope?.personaId || null
+            });
+            this._entries = entries;
+            this._save();
+        } catch (e) {
+            console.warn('[rp] semantic cache store failed:', e.message);
+        }
+    }
+
+    clear(scope = null) {
+        if (!scope) {
+            this._entries = [];
+        } else {
+            this._entries = this._load().filter(e =>
+                !(e.characterId === (scope.characterId || null) && e.personaId === (scope.personaId || null))
+            );
+        }
+        this._save();
+    }
+
+    stats() {
+        const entries = this._load();
+        return {
+            total: entries.length,
+            sizeBytes: localStorage.getItem(SemanticCache.STORAGE_KEY)?.length || 0
+        };
+    }
+}
+
+// =====================================================
+// extensions / plugin system
+// =====================================================
+// extensions are simple javascript objects (or factory functions) that subscribe
+// to events and may register slash commands or ui-slot components.
+//
+// minimal manifest shape (in-memory):
+// {
+//   id, name, version,
+//   permissions: ['chat:read', 'chat:send', 'ui:inject'],
+//   install(api): registers handlers using the provided api
+// }
+//
+// the api passed to install():
+//   api.on(event, handler)
+//   api.off(event, handler)
+//   api.registerSlashCommand(name, handler)  // handler(args, ctx) -> string | null
+//   api.registerUIComponent(slot, renderer)  // renderer(container)
+//   api.getSetting(key) / api.setSetting(key, value)
+//   api.notify(message)
+//   api.requestHttp(url, options) // proxied through /api/rp/extensions/proxy (no-op stub)
+class ExtensionManager {
+    constructor(storage) {
+        this.storage = storage;
+        this.extensions = new Map();
+        this.handlers = new Map(); // event -> Set<fn>
+        this.slashCommands = new Map(); // name -> { fn, extensionId }
+        this.uiSlots = new Map(); // slot -> [{ extensionId, render }]
+    }
+
+    register(manifest) {
+        if (!manifest || !manifest.id) {
+            console.warn('[rp] extension missing id');
+            return false;
+        }
+        if (this.extensions.has(manifest.id)) {
+            // already registered - replace
+            this.unregister(manifest.id);
+        }
+        const state = this.storage.getExtensionState(manifest.id);
+        this.extensions.set(manifest.id, { manifest, enabled: !!state.enabled });
+        if (state.enabled) this.activate(manifest.id);
+        return true;
+    }
+
+    unregister(id) {
+        this.deactivate(id);
+        this.extensions.delete(id);
+    }
+
+    activate(id) {
+        const ext = this.extensions.get(id);
+        if (!ext) return false;
+        const api = this.makeApi(id);
+        try {
+            if (typeof ext.manifest.install === 'function') {
+                ext.manifest.install(api);
+            }
+            ext.enabled = true;
+            this.storage.setExtensionState(id, { enabled: true, settings: this.storage.getExtensionState(id).settings || {} });
+        } catch (e) {
+            console.error('[rp] extension activation failed:', id, e);
+            return false;
+        }
+        return true;
+    }
+
+    deactivate(id) {
+        // strip all handlers/commands/slots registered by this extension
+        for (const [event, set] of this.handlers) {
+            for (const h of Array.from(set)) {
+                if (h.__extensionId === id) set.delete(h);
+            }
+        }
+        for (const [name, { extensionId }] of Array.from(this.slashCommands)) {
+            if (extensionId === id) this.slashCommands.delete(name);
+        }
+        for (const [slot, list] of this.uiSlots) {
+            this.uiSlots.set(slot, list.filter(r => r.extensionId !== id));
+        }
+        const ext = this.extensions.get(id);
+        if (ext) ext.enabled = false;
+        this.storage.setExtensionState(id, { enabled: false, settings: this.storage.getExtensionState(id).settings || {} });
+    }
+
+    isEnabled(id) {
+        return !!this.extensions.get(id)?.enabled;
+    }
+
+    listExtensions() {
+        return Array.from(this.extensions.values()).map(({ manifest, enabled }) => ({
+            id: manifest.id,
+            name: manifest.name || manifest.id,
+            version: manifest.version || '0.0.0',
+            description: manifest.description || '',
+            permissions: manifest.permissions || [],
+            enabled
+        }));
+    }
+
+    makeApi(extensionId) {
+        const mgr = this;
+        return {
+            on(event, handler) {
+                if (typeof handler !== 'function') return;
+                handler.__extensionId = extensionId;
+                if (!mgr.handlers.has(event)) mgr.handlers.set(event, new Set());
+                mgr.handlers.get(event).add(handler);
+            },
+            off(event, handler) {
+                if (mgr.handlers.has(event)) mgr.handlers.get(event).delete(handler);
+            },
+            registerSlashCommand(name, handler) {
+                if (!name || typeof handler !== 'function') return;
+                mgr.slashCommands.set(name.toLowerCase().replace(/^\//, ''), { fn: handler, extensionId });
+            },
+            registerUIComponent(slot, renderer) {
+                if (!mgr.uiSlots.has(slot)) mgr.uiSlots.set(slot, []);
+                mgr.uiSlots.get(slot).push({ extensionId, render: renderer });
+            },
+            getSetting(key) {
+                return (mgr.storage.getExtensionState(extensionId).settings || {})[key];
+            },
+            setSetting(key, value) {
+                const state = mgr.storage.getExtensionState(extensionId);
+                const next = Object.assign({}, state.settings || {});
+                next[key] = value;
+                mgr.storage.setExtensionState(extensionId, { settings: next });
+            },
+            notify(message) {
+                if (typeof showToast === 'function') showToast(message);
+            },
+            requestHttp(url, options = {}) {
+                // permission gate
+                const perms = (mgr.extensions.get(extensionId)?.manifest?.permissions) || [];
+                if (!perms.includes('http:request')) {
+                    return Promise.reject(new Error('extension lacks http:request permission'));
+                }
+                return fetch(url, options);
+            }
+        };
+    }
+
+    // emit an event to all listeners.
+    // listeners may mutate and return a new payload (used for chat:beforeSend).
+    emit(event, payload) {
+        const set = this.handlers.get(event);
+        if (!set || set.size === 0) return payload;
+        let result = payload;
+        for (const h of set) {
+            try {
+                const r = h(result);
+                if (r !== undefined) result = r;
+            } catch (e) {
+                console.warn(`[rp] extension handler error in event "${event}":`, e);
+            }
+        }
+        return result;
+    }
+
+    // parses a chat input line; if it looks like a slash command, runs it
+    // and returns the textual output (or '' to consume silently).
+    // returns null if the input isn't a slash command.
+    tryHandleSlashCommand(input, ctx = {}) {
+        if (!input || typeof input !== 'string') return null;
+        const trimmed = input.trim();
+        if (!trimmed.startsWith('/')) return null;
+        const space = trimmed.indexOf(' ');
+        const cmd = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).toLowerCase();
+        const args = space === -1 ? '' : trimmed.slice(space + 1);
+        const entry = this.slashCommands.get(cmd);
+        if (!entry) return null;
+        try {
+            const result = entry.fn(args, ctx);
+            return result == null ? '' : String(result);
+        } catch (e) {
+            console.error('[rp] slash command error:', cmd, e);
+            return `error running /${cmd}: ${e.message}`;
+        }
+    }
+
+    renderSlot(slot, container) {
+        const list = this.uiSlots.get(slot);
+        if (!list || list.length === 0) return;
+        for (const item of list) {
+            try { item.render(container); } catch (e) { console.warn('[rp] slot render failed:', e); }
+        }
     }
 }
 
@@ -1441,6 +3364,9 @@ class RPUIController {
         this.elements.sendBtn = document.getElementById('rp-send-btn');
         this.elements.attachBtn = document.getElementById('rp-attach-btn');
         this.elements.attachInput = document.getElementById('rp-attach-input');
+        this.elements.attachVideoBtn = document.getElementById('rp-attach-video-btn');
+        this.elements.attachVideoInput = document.getElementById('rp-attach-video-input');
+        this.elements.attachmentTray = document.getElementById('rp-attachment-tray');
         this.elements.characterInfo = document.getElementById('rp-character-info');
 
         // header elements
@@ -1470,9 +3396,13 @@ class RPUIController {
             }
         });
 
-        // image attachment
+        // image attachment (multiple selection enabled)
         this.elements.attachBtn?.addEventListener('click', () => this.elements.attachInput?.click());
         this.elements.attachInput?.addEventListener('change', (e) => this.handleImageAttach(e));
+
+        // video attachment (experimental: first-frame extraction)
+        this.elements.attachVideoBtn?.addEventListener('click', () => this.elements.attachVideoInput?.click());
+        this.elements.attachVideoInput?.addEventListener('change', (e) => this.handleVideoAttach(e));
     }
 
     // view management
@@ -1488,8 +3418,10 @@ class RPUIController {
     }
 
     goBack() {
-        if (this.rp.currentCharacter) {
+        if (this.rp.currentCharacter || this.rp.currentGroup) {
             this.rp.currentCharacter = null;
+            this.rp.currentGroup = null;
+            this.rp.groupChatHistory = [];
             this.showView('characterGrid');
             this.renderCharacterGrid();
         } else {
@@ -1516,7 +3448,16 @@ class RPUIController {
             showToast?.('character not found');
             return;
         }
+        this.rp.currentGroup = null;
+        this.rp.groupChatHistory = [];
 
+        this.showView('chatView');
+        this.renderChat();
+    }
+
+    showGroupChat(groupId) {
+        const group = this.rp.selectGroup(groupId);
+        if (!group) { showToast?.('group not found'); return; }
         this.showView('chatView');
         this.renderChat();
     }
@@ -1525,10 +3466,44 @@ class RPUIController {
     renderCharacterGrid() {
         if (!this.elements.characterGrid) return;
 
+        // default to characters tab
+        if (!this.currentTab) this.currentTab = 'characters';
+
+        // render tabs + container
+        this.elements.characterGrid.innerHTML = '';
+        const tabs = document.createElement('div');
+        tabs.className = 'rp-tabs';
+        for (const t of [
+            { id: 'characters', label: 'characters', icon: '🎭' },
+            { id: 'groups', label: 'groups', icon: '👥' },
+            { id: 'extensions', label: 'extensions', icon: '🧩' }
+        ]) {
+            const btn = document.createElement('button');
+            btn.className = 'rp-tab' + (this.currentTab === t.id ? ' rp-tab-active' : '');
+            btn.textContent = `${t.icon} ${t.label}`;
+            btn.addEventListener('click', () => { this.currentTab = t.id; this.renderCharacterGrid(); });
+            tabs.appendChild(btn);
+        }
+        this.elements.characterGrid.appendChild(tabs);
+
+        const body = document.createElement('div');
+        body.className = 'rp-tab-body';
+        this.elements.characterGrid.appendChild(body);
+
+        if (this.currentTab === 'groups') {
+            this.renderGroupsTab(body);
+            return;
+        }
+        if (this.currentTab === 'extensions') {
+            this.renderExtensionsTab(body);
+            return;
+        }
+
+        // --- characters tab ---
         const characters = this.rp.storage.getAllCharacters();
 
         if (characters.length === 0) {
-            this.elements.characterGrid.innerHTML = `
+            body.innerHTML = `
                 <div class="rp-empty-state">
                     <div class="rp-empty-icon">🎭</div>
                     <div class="rp-empty-title">no characters yet</div>
@@ -1616,11 +3591,10 @@ class RPUIController {
             grid.appendChild(card);
         }
 
-        this.elements.characterGrid.innerHTML = '';
-        this.elements.characterGrid.appendChild(grid);
+        body.appendChild(grid);
 
         // bind events
-        this.elements.characterGrid.querySelectorAll('.rp-character-card').forEach(card => {
+        body.querySelectorAll('.rp-character-card').forEach(card => {
             const id = card.dataset.id;
 
             // click to open chat
@@ -1657,85 +3631,705 @@ class RPUIController {
         });
     }
 
+    // ---- groups tab ----
+    renderGroupsTab(body) {
+        const groups = this.rp.storage.getAllGroups();
+        const header = document.createElement('div');
+        header.className = 'rp-tab-header';
+        const title = document.createElement('h3');
+        title.textContent = 'groups';
+        header.appendChild(title);
+        const addBtn = document.createElement('button');
+        addBtn.className = 'rp-btn rp-btn-primary';
+        addBtn.textContent = '+ new group';
+        addBtn.addEventListener('click', () => this.showGroupEditor());
+        header.appendChild(addBtn);
+        body.appendChild(header);
+
+        if (groups.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'rp-empty-state';
+            empty.innerHTML = `
+                <div class="rp-empty-icon">👥</div>
+                <div class="rp-empty-title">no groups yet</div>
+                <div class="rp-empty-desc">create a group to chat with multiple characters at once</div>`;
+            body.appendChild(empty);
+            return;
+        }
+
+        const grid = document.createElement('div');
+        grid.className = 'rp-grid';
+        for (const g of groups) {
+            const card = document.createElement('div');
+            card.className = 'rp-character-card';
+            card.dataset.id = g.id;
+
+            const av = document.createElement('div');
+            av.className = 'rp-character-avatar';
+            if (g.avatarUrl) av.style.backgroundImage = `url('${g.avatarUrl.replace(/'/g, "\\'")}')`;
+            else av.textContent = '👥';
+            card.appendChild(av);
+
+            const name = document.createElement('div');
+            name.className = 'rp-character-name';
+            name.textContent = g.name;
+            card.appendChild(name);
+
+            const sub = document.createElement('div');
+            sub.className = 'rp-character-sub';
+            sub.textContent = `${g.characterIds.length} characters`;
+            card.appendChild(sub);
+
+            const actions = document.createElement('div');
+            actions.className = 'rp-character-actions';
+            const edit = document.createElement('button');
+            edit.className = 'rp-action-btn';
+            edit.textContent = '✏️';
+            edit.title = 'edit';
+            edit.addEventListener('click', (e) => { e.stopPropagation(); this.showGroupEditor(g.id); });
+            actions.appendChild(edit);
+            const del = document.createElement('button');
+            del.className = 'rp-action-btn rp-action-delete';
+            del.textContent = '🗑️';
+            del.title = 'delete';
+            del.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm('delete this group? chat history will also be removed.')) {
+                    this.rp.deleteGroup(g.id);
+                    this.renderCharacterGrid();
+                }
+            });
+            actions.appendChild(del);
+            card.appendChild(actions);
+
+            card.addEventListener('click', (e) => {
+                if (!e.target.closest('.rp-action-btn')) this.showGroupChat(g.id);
+            });
+            grid.appendChild(card);
+        }
+        body.appendChild(grid);
+    }
+
+    // ---- group editor ----
+    showGroupEditor(groupId = null) {
+        const group = groupId ? this.rp.storage.getGroup(groupId) : null;
+        const isNew = !group;
+        this.showView('characterEditor');
+        const editor = this.elements.characterEditor;
+        const allChars = this.rp.storage.getAllCharacters();
+        const selected = new Set(group ? group.characterIds : []);
+        const settings = Object.assign({
+            turnOrder: 'sequential', autoAdvance: true, responseDelayMs: 0, systemPromptTemplate: ''
+        }, group?.settings || {});
+
+        editor.innerHTML = `
+            <div class="rp-editor-header">
+                <button class="rp-back-btn" id="rp-geditor-back">←</button>
+                <h2>${isNew ? 'new group' : 'edit group'}</h2>
+            </div>
+            <div class="rp-editor-content">
+                <div class="rp-form-group">
+                    <label>avatar</label>
+                    <div class="rp-avatar-upload">
+                        <div class="rp-avatar-preview" id="rp-geditor-avatar-preview" style="background-image: url('${(group?.avatarUrl || '').replace(/'/g, "\\'")}')">${!group?.avatarUrl ? '👥' : ''}</div>
+                        <input type="file" accept="image/*" id="rp-geditor-avatar-input" class="hidden">
+                        <button type="button" class="rp-btn" id="rp-geditor-avatar-btn">upload avatar</button>
+                    </div>
+                </div>
+                <div class="rp-form-group">
+                    <label>name *</label>
+                    <input type="text" id="rp-geditor-name" value="${this.escapeHtml(group?.name || '')}" placeholder="group name">
+                </div>
+                <div class="rp-form-group">
+                    <label>description</label>
+                    <textarea id="rp-geditor-desc" rows="3" placeholder="what is this group about?">${this.escapeHtml(group?.description || '')}</textarea>
+                </div>
+                <div class="rp-form-group">
+                    <label>characters (drag to reorder)</label>
+                    <div id="rp-geditor-character-list" class="rp-group-char-list"></div>
+                </div>
+                <div class="rp-form-group">
+                    <label>turn order</label>
+                    <select id="rp-geditor-order">
+                        <option value="sequential" ${settings.turnOrder==='sequential'?'selected':''}>sequential (all characters respond in order)</option>
+                        <option value="roundRobin" ${settings.turnOrder==='roundRobin'?'selected':''}>round robin (one at a time, rotates)</option>
+                        <option value="random" ${settings.turnOrder==='random'?'selected':''}>random</option>
+                    </select>
+                </div>
+                <div class="rp-form-group">
+                    <label><input type="checkbox" id="rp-geditor-auto" ${settings.autoAdvance?'checked':''}> auto-advance (send next character automatically)</label>
+                </div>
+                <div class="rp-form-group">
+                    <label>response delay (ms)</label>
+                    <input type="number" id="rp-geditor-delay" min="0" max="5000" value="${settings.responseDelayMs || 0}">
+                </div>
+                <div class="rp-form-group">
+                    <label>group-level system prompt (optional)</label>
+                    <textarea id="rp-geditor-sysprompt" rows="3" placeholder="prepended to every character's system prompt">${this.escapeHtml(settings.systemPromptTemplate || '')}</textarea>
+                </div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-geditor-cancel">cancel</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-geditor-save">${isNew ? 'create' : 'save'}</button>
+                </div>
+            </div>`;
+
+        // render character picker
+        const listEl = document.getElementById('rp-geditor-character-list');
+        const renderCharList = () => {
+            listEl.innerHTML = '';
+            // selected first, in chosen order
+            const order = group ? group.characterIds.slice() : Array.from(selected);
+            const renderItem = (char, isSelected) => {
+                const row = document.createElement('div');
+                row.className = 'rp-group-char-item' + (isSelected ? ' rp-group-char-selected' : '');
+                row.dataset.id = char.id;
+                row.innerHTML = `
+                    <div class="rp-persona-avatar" style="background-image: url('${(char.avatarUrl||'').replace(/'/g, "\\'")}')">${!char.avatarUrl ? '🎭' : ''}</div>
+                    <div class="rp-persona-info"><div class="rp-persona-name">${this.escapeHtml(char.name)}</div></div>
+                    <button class="rp-action-btn" data-action="${isSelected ? 'remove' : 'add'}">${isSelected ? '−' : '+'}</button>`;
+                row.querySelector('button').addEventListener('click', () => {
+                    if (isSelected) selected.delete(char.id);
+                    else selected.add(char.id);
+                    renderCharList();
+                });
+                return row;
+            };
+            for (const id of order) {
+                const c = this.rp.storage.getCharacter(id);
+                if (c && selected.has(id)) listEl.appendChild(renderItem(c, true));
+            }
+            // any remaining selected
+            for (const id of selected) {
+                if (order.includes(id)) continue;
+                const c = this.rp.storage.getCharacter(id);
+                if (c) listEl.appendChild(renderItem(c, true));
+            }
+            // separator
+            const sep = document.createElement('div');
+            sep.className = 'rp-group-char-sep';
+            sep.textContent = 'available characters';
+            listEl.appendChild(sep);
+            for (const c of allChars) {
+                if (selected.has(c.id)) continue;
+                listEl.appendChild(renderItem(c, false));
+            }
+        };
+        renderCharList();
+
+        let avatarData = group?.avatarUrl || '';
+        document.getElementById('rp-geditor-avatar-btn').addEventListener('click', () => document.getElementById('rp-geditor-avatar-input').click());
+        document.getElementById('rp-geditor-avatar-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            if (file.size > 500 * 1024) { showToast?.('avatar must be under 500kb'); return; }
+            avatarData = await this.rp.fileToDataUrl(file);
+            const prev = document.getElementById('rp-geditor-avatar-preview');
+            prev.style.backgroundImage = `url('${avatarData.replace(/'/g, "\\'")}')`;
+            prev.textContent = '';
+        });
+
+        document.getElementById('rp-geditor-back').addEventListener('click', () => { this.showView('characterGrid'); this.renderCharacterGrid(); });
+        document.getElementById('rp-geditor-cancel').addEventListener('click', () => { this.showView('characterGrid'); this.renderCharacterGrid(); });
+        document.getElementById('rp-geditor-save').addEventListener('click', () => {
+            const name = document.getElementById('rp-geditor-name').value.trim();
+            if (!name) { showToast?.('name is required'); return; }
+            const data = {
+                name,
+                description: document.getElementById('rp-geditor-desc').value,
+                avatarUrl: avatarData,
+                characterIds: (() => {
+                    // preserve original order for kept ids, then append newly added
+                    const orig = group?.characterIds || [];
+                    const kept = orig.filter(id => selected.has(id));
+                    const added = Array.from(selected).filter(id => !kept.includes(id));
+                    return kept.concat(added);
+                })(),
+                settings: {
+                    turnOrder: document.getElementById('rp-geditor-order').value,
+                    autoAdvance: document.getElementById('rp-geditor-auto').checked,
+                    responseDelayMs: parseInt(document.getElementById('rp-geditor-delay').value, 10) || 0,
+                    systemPromptTemplate: document.getElementById('rp-geditor-sysprompt').value
+                }
+            };
+            if (isNew) {
+                this.rp.createGroup(data);
+                showToast?.('group created');
+            } else {
+                this.rp.updateGroup(groupId, data);
+                showToast?.('group saved');
+            }
+            this.currentTab = 'groups';
+            this.showView('characterGrid');
+            this.renderCharacterGrid();
+        });
+    }
+
+    // ---- extensions tab ----
+    renderExtensionsTab(body) {
+        const header = document.createElement('div');
+        header.className = 'rp-tab-header';
+        const title = document.createElement('h3');
+        title.textContent = 'extensions';
+        header.appendChild(title);
+        body.appendChild(header);
+
+        const list = window.rpExtensions ? window.rpExtensions.listExtensions() : [];
+        if (list.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'rp-empty-state';
+            empty.innerHTML = `
+                <div class="rp-empty-icon">🧩</div>
+                <div class="rp-empty-title">no extensions installed</div>
+                <div class="rp-empty-desc">extensions can add slash commands, ui widgets, and chat hooks. drop them on <code>window.rpBundledExtensions</code> before initialization.</div>`;
+            body.appendChild(empty);
+            return;
+        }
+
+        for (const ext of list) {
+            const card = document.createElement('div');
+            card.className = 'rp-extension-card';
+            card.innerHTML = `
+                <div class="rp-extension-meta">
+                    <div class="rp-extension-name">${this.escapeHtml(ext.name)} <span class="rp-extension-version">v${this.escapeHtml(ext.version)}</span></div>
+                    <div class="rp-extension-desc">${this.escapeHtml(ext.description || '')}</div>
+                    <div class="rp-extension-perms">permissions: ${ext.permissions.length ? ext.permissions.map(p => `<code>${this.escapeHtml(p)}</code>`).join(' ') : '<em>none</em>'}</div>
+                </div>
+                <div class="rp-extension-toggle">
+                    <label class="rp-switch">
+                        <input type="checkbox" ${ext.enabled ? 'checked' : ''} data-ext="${this.escapeHtml(ext.id)}">
+                        <span>${ext.enabled ? 'enabled' : 'disabled'}</span>
+                    </label>
+                </div>`;
+            card.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {
+                const id = e.target.dataset.ext;
+                if (e.target.checked) window.rpExtensions.activate(id);
+                else window.rpExtensions.deactivate(id);
+                this.renderCharacterGrid();
+            });
+            body.appendChild(card);
+        }
+    }
+
     renderChat() {
-        if (!this.elements.chatMessages || !this.rp.currentCharacter) return;
+        if (!this.elements.chatMessages) return;
 
+        const isGroup = !!this.rp.currentGroup;
         const character = this.rp.currentCharacter;
+        const group = this.rp.currentGroup;
         const persona = this.rp.currentPersona;
+        const history = isGroup ? this.rp.groupChatHistory : this.rp.chatHistory;
 
-        // update character info
+        if (!isGroup && !character) return;
+
+        // header
         if (this.elements.characterInfo) {
+            const headerAvatar = isGroup ? (group.avatarUrl || '') : (character.avatarUrl || '');
+            const headerName = isGroup ? group.name : character.name;
+            const subline = isGroup
+                ? `group chat · ${this.rp.getGroupRoster(group).length} characters`
+                : `chatting as ${this.escapeHtml(persona?.name || 'you')}`;
+
             this.elements.characterInfo.innerHTML = `
                 <div class="rp-chat-header-info">
-                    <div class="rp-chat-avatar" style="background-image: url('${character.avatarUrl || ''}')">
-                        ${!character.avatarUrl ? '🎭' : ''}
+                    <div class="rp-chat-avatar" style="background-image: url('${headerAvatar}')">
+                        ${!headerAvatar ? (isGroup ? '👥' : '🎭') : ''}
                     </div>
                     <div class="rp-chat-header-text">
-                        <div class="rp-chat-character-name">${this.escapeHtml(character.name)}</div>
-                        <div class="rp-chat-persona-name">chatting as ${this.escapeHtml(persona?.name || 'you')}</div>
+                        <div class="rp-chat-character-name">${this.escapeHtml(headerName)}</div>
+                        <div class="rp-chat-persona-name">${subline}</div>
                     </div>
                 </div>
                 <div class="rp-chat-header-actions">
+                    <button class="rp-action-btn" id="rp-memory-btn" title="memories">🧠</button>
+                    <button class="rp-action-btn" id="rp-macros-btn" title="macros">🪄</button>
+                    ${isGroup ? '' : `<button class="rp-action-btn" id="rp-summarize-chat" title="summarize">📝</button>`}
                     <button class="rp-action-btn" id="rp-clear-chat" title="clear chat">🗑️</button>
-                    <button class="rp-action-btn" id="rp-regenerate" title="regenerate">🔄</button>
+                    ${isGroup ? `<button class="rp-action-btn" id="rp-group-next" title="next speaker">⏭️</button>` : `<button class="rp-action-btn" id="rp-regenerate" title="regenerate">🔄</button>`}
                 </div>
             `;
 
-            // bind header actions
             document.getElementById('rp-clear-chat')?.addEventListener('click', () => {
                 if (confirm('clear all messages in this chat?')) {
-                    this.rp.clearChat();
+                    if (isGroup) this.rp.clearGroupChat();
+                    else this.rp.clearChat();
                     this.renderChat();
                     showToast?.('chat cleared');
                 }
             });
-
-            document.getElementById('rp-regenerate')?.addEventListener('click', () => {
-                this.regenerateLastMessage();
-            });
+            document.getElementById('rp-regenerate')?.addEventListener('click', () => this.regenerateLastMessage());
+            document.getElementById('rp-summarize-chat')?.addEventListener('click', () => this.showSummarizeModal());
+            document.getElementById('rp-group-next')?.addEventListener('click', () => this.handleGroupNext());
+            document.getElementById('rp-memory-btn')?.addEventListener('click', () => this.toggleMemoryPanel());
+            document.getElementById('rp-macros-btn')?.addEventListener('click', () => this.showMacrosModal());
         }
 
-        // render messages
-        let html = '';
+        // build messages via dom for safe rendering
+        const messagesEl = this.elements.chatMessages;
+        messagesEl.innerHTML = '';
 
-        // show greeting if no messages
-        if (this.rp.chatHistory.length === 0 && character.firstMes) {
-            html += `
-                <div class="rp-message rp-message-assistant rp-message-greeting">
-                    <div class="rp-message-avatar" style="background-image: url('${character.avatarUrl || ''}')">
-                        ${!character.avatarUrl ? '🎭' : ''}
-                    </div>
-                    <div class="rp-message-content">
-                        <div class="rp-message-name">${this.escapeHtml(character.name)}</div>
-                        <div class="rp-message-text">${this.formatMessage(character.firstMes)}</div>
-                    </div>
-                </div>
-            `;
+        // greeting placeholder when chat is empty (single-character only)
+        if (!isGroup && history.length === 0 && character.firstMes) {
+            messagesEl.appendChild(this.buildMessageNode({
+                msg: new ChatMessage({ role: 'assistant', content: character.firstMes }),
+                index: -1,
+                character,
+                persona,
+                isGreeting: true
+            }));
         }
 
-        // render chat history
-        for (const msg of this.rp.chatHistory) {
-            const isUser = msg.role === 'user';
-            const avatar = isUser ? (persona?.avatarUrl || '') : (character.avatarUrl || '');
-            const name = isUser ? (persona?.name || 'you') : character.name;
-            const placeholder = isUser ? '👤' : '🎭';
-
-            html += `
-                <div class="rp-message rp-message-${msg.role}" data-id="${msg.id}">
-                    <div class="rp-message-avatar" style="background-image: url('${avatar}')">
-                        ${!avatar ? placeholder : ''}
-                    </div>
-                    <div class="rp-message-content">
-                        <div class="rp-message-name">${this.escapeHtml(name)}</div>
-                        <div class="rp-message-text">${this.formatMessage(msg.content)}</div>
-                        ${msg.images?.length ? this.renderMessageImages(msg.images) : ''}
-                    </div>
-                </div>
-            `;
+        // for group chats: greeting can be each character's firstMes, or skip
+        if (isGroup && history.length === 0) {
+            const roster = this.rp.getGroupRoster(group);
+            for (const c of roster) {
+                if (!c.firstMes) continue;
+                messagesEl.appendChild(this.buildMessageNode({
+                    msg: new ChatMessage({ role: 'assistant', content: c.firstMes, speakerCharacterId: c.id }),
+                    index: -1,
+                    character: c,
+                    persona,
+                    isGreeting: true
+                }));
+            }
         }
 
-        this.elements.chatMessages.innerHTML = html;
+        history.forEach((msg, i) => {
+            // for group chats, resolve the speaker character
+            let speakerChar = character;
+            if (isGroup && msg.role === 'assistant') {
+                speakerChar = this.rp.storage.getCharacter(msg.speakerCharacterId) || speakerChar;
+            }
+            messagesEl.appendChild(this.buildMessageNode({
+                msg,
+                index: i,
+                character: speakerChar,
+                persona,
+                isGroup
+            }));
+        });
+
+        this.renderQuickReplyBar();
+        // allow extensions to inject into the message area
+        try { window.rpExtensions?.renderSlot('chat:afterMessages', messagesEl); } catch (e) {}
         this.scrollToBottom();
+    }
+
+    // builds a single message dom node with avatar, name, content and actions.
+    buildMessageNode({ msg, index, character, persona, isGreeting = false, isGroup = false }) {
+        const isUser = msg.role === 'user';
+        const isSystem = msg.role === 'system';
+        const wrapper = document.createElement('div');
+        wrapper.className = `rp-message rp-message-${msg.role}`;
+        if (isGreeting) wrapper.classList.add('rp-message-greeting');
+        if (msg.isSummary) wrapper.classList.add('rp-message-summary');
+        if (msg.id) wrapper.dataset.id = msg.id;
+        if (typeof index === 'number') wrapper.dataset.index = String(index);
+
+        // avatar (system messages have no avatar)
+        if (!isSystem) {
+            const avatarUrl = isUser
+                ? (persona?.avatarUrl || '')
+                : ExpressionDetector.getAvatarUrl(character, msg.expression);
+            const avatar = document.createElement('div');
+            avatar.className = 'rp-message-avatar';
+            if (avatarUrl) avatar.style.backgroundImage = `url('${avatarUrl.replace(/'/g, "\\'")}')`;
+            else avatar.textContent = isUser ? '👤' : '🎭';
+            wrapper.appendChild(avatar);
+        }
+
+        const content = document.createElement('div');
+        content.className = 'rp-message-content';
+
+        if (!isSystem) {
+            const nameRow = document.createElement('div');
+            nameRow.className = 'rp-message-name';
+            const name = isUser ? (persona?.name || 'you') : (character?.name || 'character');
+            nameRow.textContent = name;
+            // expression badge for assistant messages
+            if (!isUser && msg.expression) {
+                const badge = document.createElement('span');
+                badge.className = 'rp-expression-badge';
+                badge.textContent = ' · ' + msg.expression;
+                nameRow.appendChild(badge);
+            }
+            content.appendChild(nameRow);
+        }
+
+        const text = document.createElement('div');
+        text.className = 'rp-message-text';
+        const activeContent = typeof msg.getActiveContent === 'function' ? msg.getActiveContent() : msg.content;
+        text.innerHTML = this.formatMessage(activeContent);
+        content.appendChild(text);
+
+        // images
+        if (msg.images?.length) {
+            const imgs = document.createElement('div');
+            imgs.className = 'rp-message-images';
+            for (const src of msg.images) {
+                const im = document.createElement('img');
+                im.className = 'rp-message-image';
+                im.src = src;
+                im.addEventListener('click', () => this.showImageModal(src));
+                imgs.appendChild(im);
+            }
+            content.appendChild(imgs);
+        }
+
+        // action footer (skip for system messages and greeting placeholders)
+        if (!isSystem && !isGreeting && typeof index === 'number' && index >= 0) {
+            const footer = document.createElement('div');
+            footer.className = 'rp-message-actions';
+
+            // swipe / variant controls (assistant only)
+            if (!isUser) {
+                const total = msg.totalVariants ? msg.totalVariants() : 1;
+                const cur = msg.activeVariantNumber ? msg.activeVariantNumber() : 1;
+
+                const prevBtn = document.createElement('button');
+                prevBtn.className = 'rp-msg-btn';
+                prevBtn.title = 'previous variant';
+                prevBtn.textContent = '◀';
+                prevBtn.disabled = total <= 1;
+                prevBtn.addEventListener('click', () => this.cycleVariant(index, -1));
+                footer.appendChild(prevBtn);
+
+                const counter = document.createElement('span');
+                counter.className = 'rp-variant-counter';
+                counter.textContent = `${cur}/${total}`;
+                footer.appendChild(counter);
+
+                const nextBtn = document.createElement('button');
+                nextBtn.className = 'rp-msg-btn';
+                nextBtn.title = 'next variant';
+                nextBtn.textContent = '▶';
+                nextBtn.addEventListener('click', () => this.cycleVariant(index, 1));
+                footer.appendChild(nextBtn);
+
+                const swipeBtn = document.createElement('button');
+                swipeBtn.className = 'rp-msg-btn';
+                swipeBtn.title = 'swipe (new variant)';
+                swipeBtn.textContent = '↻';
+                swipeBtn.addEventListener('click', () => this.handleSwipe(index));
+                footer.appendChild(swipeBtn);
+
+                const contBtn = document.createElement('button');
+                contBtn.className = 'rp-msg-btn';
+                contBtn.title = 'continue this message';
+                contBtn.textContent = '⏩';
+                contBtn.addEventListener('click', () => this.handleContinue(index));
+                footer.appendChild(contBtn);
+
+                // expression manual selector
+                if (character?.expressions?.length > 0) {
+                    const expBtn = document.createElement('button');
+                    expBtn.className = 'rp-msg-btn';
+                    expBtn.title = 'change expression';
+                    expBtn.textContent = '🎭';
+                    expBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.showExpressionMenu(character, msg, wrapper);
+                    });
+                    footer.appendChild(expBtn);
+                }
+            }
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'rp-msg-btn rp-msg-btn-danger';
+            delBtn.title = 'delete message';
+            delBtn.textContent = '🗑️';
+            delBtn.addEventListener('click', () => this.deleteMessage(index));
+            footer.appendChild(delBtn);
+
+            content.appendChild(footer);
+        }
+
+        wrapper.appendChild(content);
+        return wrapper;
+    }
+
+    // ---- swipes ----
+    async cycleVariant(index, direction) {
+        const isGroup = !!this.rp.currentGroup;
+        const history = isGroup ? this.rp.groupChatHistory : this.rp.chatHistory;
+        const msg = history[index];
+        if (!msg) return;
+        const total = msg.totalVariants();
+        const cur = msg.activeVariantNumber();
+        const nextNum = ((cur - 1 + direction + total) % total) + 1;
+        // map 1-indexed display number back to activeVariantIndex (-1 means root)
+        const newIdx = nextNum === 1 ? -1 : nextNum - 2;
+        if (isGroup) {
+            msg.activeVariantIndex = newIdx;
+            this.rp.persistCurrentGroupChat();
+        } else {
+            this.rp.setActiveVariant(index, newIdx);
+        }
+        this.renderChat();
+    }
+
+    async handleSwipe(index) {
+        const isGroup = !!this.rp.currentGroup;
+        try {
+            if (isGroup) {
+                // group: swipe regenerates the speaker's variant
+                const msg = this.rp.groupChatHistory[index];
+                if (!msg || msg.role !== 'assistant') return;
+                const speaker = this.rp.storage.getCharacter(msg.speakerCharacterId);
+                if (!speaker) { showToast?.('speaker not found'); return; }
+                // temporarily strip messages after this one to recompute context
+                const original = this.rp.groupChatHistory.slice();
+                this.rp.groupChatHistory = original.slice(0, index);
+                const { stream } = await this.rp.generateGroupTurn(speaker);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                // restore history and append a variant
+                this.rp.groupChatHistory = original;
+                msg.variants.push({ content: full, generatedAt: new Date().toISOString(), model: NVIDIA_NIM_CONFIG.model });
+                msg.activeVariantIndex = msg.variants.length - 1;
+                try { msg.expression = ExpressionDetector.detect(speaker, full) || msg.expression; } catch (e) {}
+                this.rp.persistCurrentGroupChat();
+            } else {
+                const { stream, temperature } = await this.rp.generateSwipe(index);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                this.rp.commitSwipe(index, full, { temperature });
+            }
+            this.renderChat();
+        } catch (e) {
+            console.error('[rp] swipe error:', e);
+            showToast?.('swipe failed: ' + e.message);
+        }
+    }
+
+    async handleContinue(index) {
+        const isGroup = !!this.rp.currentGroup;
+        try {
+            if (isGroup) {
+                const msg = this.rp.groupChatHistory[index];
+                if (!msg || msg.role !== 'assistant') return;
+                const speaker = this.rp.storage.getCharacter(msg.speakerCharacterId);
+                if (!speaker) return;
+                // build context including the partial assistant message
+                const orig = this.rp.groupChatHistory.slice();
+                this.rp.groupChatHistory = orig.slice(0, index + 1);
+                const { stream } = await this.rp.generateGroupTurn(speaker);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                this.rp.groupChatHistory = orig;
+                const joiner = /\s$/.test(msg.getActiveContent()) ? '' : ' ';
+                if (msg.activeVariantIndex >= 0 && msg.variants[msg.activeVariantIndex]) {
+                    msg.variants[msg.activeVariantIndex].content += joiner + full;
+                } else {
+                    msg.content += joiner + full;
+                }
+                msg.isEdited = true;
+                this.rp.persistCurrentGroupChat();
+            } else {
+                const { stream } = await this.rp.generateContinuation(index);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                this.rp.commitContinuation(index, full);
+            }
+            this.renderChat();
+        } catch (e) {
+            console.error('[rp] continue error:', e);
+            showToast?.('continue failed: ' + e.message);
+        }
+    }
+
+    deleteMessage(index) {
+        const isGroup = !!this.rp.currentGroup;
+        if (!confirm('delete this message?')) return;
+        const history = isGroup ? this.rp.groupChatHistory : this.rp.chatHistory;
+        history.splice(index, 1);
+        if (isGroup) this.rp.persistCurrentGroupChat();
+        else this.rp.persistCurrentChat();
+        this.renderChat();
+    }
+
+    showExpressionMenu(character, msg, anchor) {
+        // simple inline menu
+        const existing = document.querySelector('.rp-expression-menu');
+        if (existing) existing.remove();
+        const menu = document.createElement('div');
+        menu.className = 'rp-expression-menu';
+        for (const exp of character.expressions) {
+            const item = document.createElement('button');
+            item.className = 'rp-expression-item';
+            if (exp.avatarUrl) {
+                const img = document.createElement('img');
+                img.src = exp.avatarUrl;
+                item.appendChild(img);
+            }
+            const label = document.createElement('span');
+            label.textContent = exp.name;
+            item.appendChild(label);
+            item.addEventListener('click', () => {
+                msg.expression = exp.name;
+                if (this.rp.currentGroup) this.rp.persistCurrentGroupChat();
+                else this.rp.persistCurrentChat();
+                menu.remove();
+                this.renderChat();
+            });
+            menu.appendChild(item);
+        }
+        anchor.appendChild(menu);
+        setTimeout(() => {
+            const onDoc = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', onDoc); } };
+            document.addEventListener('click', onDoc);
+        }, 0);
+    }
+
+    // ---- group chat helpers ----
+    async handleGroupNext() {
+        if (!this.rp.currentGroup) return;
+        // pick next speaker. for round-robin/random use the chooser,
+        // for sequential pick the next character after the last assistant.
+        const history = this.rp.groupChatHistory;
+        const lastAssistant = [...history].reverse().find(m => m.role === 'assistant');
+        const lastSpeakerId = lastAssistant?.speakerCharacterId || null;
+        let speakers = this.rp.decideGroupSpeakers(this.rp.currentGroup, lastSpeakerId);
+        if (this.rp.currentGroup.settings.turnOrder === 'sequential') {
+            // pick just the next one in line
+            const roster = this.rp.getGroupRoster(this.rp.currentGroup);
+            if (roster.length === 0) return;
+            let idx = 0;
+            if (lastSpeakerId) {
+                const i = roster.findIndex(c => c.id === lastSpeakerId);
+                idx = (i + 1) % roster.length;
+            }
+            speakers = [roster[idx]];
+        } else if (speakers.length > 1) {
+            speakers = [speakers[0]];
+        }
+        for (const speaker of speakers) {
+            await this.streamGroupTurn(speaker);
+        }
+    }
+
+    async streamGroupTurn(speaker) {
+        const { stream } = await this.rp.generateGroupTurn(speaker);
+        // build a streaming bubble
+        const node = document.createElement('div');
+        node.className = 'rp-message rp-message-assistant rp-message-streaming';
+        const avatarUrl = ExpressionDetector.getAvatarUrl(speaker, null);
+        node.innerHTML = `
+            <div class="rp-message-avatar" style="background-image: url('${(avatarUrl || '').replace(/'/g, "\\'")}')">${!avatarUrl ? '🎭' : ''}</div>
+            <div class="rp-message-content">
+                <div class="rp-message-name">${this.escapeHtml(speaker.name)}</div>
+                <div class="rp-message-text"></div>
+            </div>`;
+        this.elements.chatMessages.appendChild(node);
+        const textEl = node.querySelector('.rp-message-text');
+        let full = '';
+        for await (const chunk of stream) {
+            full += chunk;
+            textEl.innerHTML = this.formatMessage(full);
+            this.scrollToBottom();
+        }
+        // strip the streaming class and persist
+        node.classList.remove('rp-message-streaming');
+        this.rp.commitGroupAssistantMessage(speaker, full);
+        this.renderChat();
     }
 
     formatMessage(text) {
@@ -1806,24 +4400,81 @@ class RPUIController {
         const text = input.value.trim();
         if (!text && !this.pendingImages?.length) return;
 
+        // check for slash commands handled by extensions
+        if (text.startsWith('/') && window.rpExtensions) {
+            const out = window.rpExtensions.tryHandleSlashCommand(text, {
+                character: this.rp.currentCharacter,
+                group: this.rp.currentGroup,
+                persona: this.rp.currentPersona
+            });
+            if (out !== null) {
+                input.value = '';
+                if (out) {
+                    // inject as a system message visible to the user only
+                    const isGroup = !!this.rp.currentGroup;
+                    const sys = new ChatMessage({ role: 'system', content: out });
+                    if (isGroup) {
+                        this.rp.groupChatHistory.push(sys);
+                        this.rp.persistCurrentGroupChat();
+                    } else if (this.rp.currentCharacter) {
+                        this.rp.chatHistory.push(sys);
+                        this.rp.persistCurrentChat();
+                    }
+                    this.renderChat();
+                }
+                return;
+            }
+        }
+
         input.value = '';
 
-        try {
-            const { userMessage, stream } = await this.rp.sendMessage(text, this.pendingImages || []);
-            this.pendingImages = [];
+        const isGroup = !!this.rp.currentGroup;
 
-            // render user message
+        try {
+            if (isGroup) {
+                await this.rp.sendGroupMessage(text, this.consumePendingAttachmentUrls());
+                this.pendingImages = [];
+                this.renderAttachmentTray();
+                this.renderChat();
+                // auto-advance: each character takes a turn in order
+                if (this.rp.currentGroup.settings.autoAdvance) {
+                    const order = this.rp.currentGroup.settings.turnOrder;
+                    const roster = this.rp.getGroupRoster(this.rp.currentGroup);
+                    let speakers;
+                    if (order === 'random') {
+                        const idx = Math.floor(Math.random() * roster.length);
+                        speakers = [roster[idx]];
+                    } else if (order === 'roundRobin') {
+                        speakers = [roster[0]];
+                    } else {
+                        speakers = roster;
+                    }
+                    for (const sp of speakers) {
+                        if (this.rp.currentGroup.settings.responseDelayMs) {
+                            await new Promise(r => setTimeout(r, this.rp.currentGroup.settings.responseDelayMs));
+                        }
+                        await this.streamGroupTurn(sp);
+                    }
+                }
+                return;
+            }
+
+            const sendResult = await this.rp.sendMessage(text, this.consumePendingAttachmentUrls());
+            const { stream, cacheHit, similarity, _cachePrecomputedEmbedding, _cacheText } = sendResult;
+            this.pendingImages = [];
+            this.renderAttachmentTray();
+
             this.renderChat();
 
-            // create assistant message element for streaming
             const assistantMsgDiv = document.createElement('div');
             assistantMsgDiv.className = 'rp-message rp-message-assistant rp-message-streaming';
+            const avatarUrl = ExpressionDetector.getAvatarUrl(this.rp.currentCharacter, null);
             assistantMsgDiv.innerHTML = `
-                <div class="rp-message-avatar" style="background-image: url('${this.rp.currentCharacter.avatarUrl || ''}')">
-                    ${!this.rp.currentCharacter.avatarUrl ? '🎭' : ''}
+                <div class="rp-message-avatar" style="background-image: url('${(avatarUrl || '').replace(/'/g, "\\'")}')">
+                    ${!avatarUrl ? '🎭' : ''}
                 </div>
                 <div class="rp-message-content">
-                    <div class="rp-message-name">${this.escapeHtml(this.rp.currentCharacter.name)}</div>
+                    <div class="rp-message-name">${this.escapeHtml(this.rp.currentCharacter.name)}${cacheHit ? ` <span class="rp-cache-badge" title="semantic cache hit (similarity ${(similarity || 0).toFixed(2)})">cached</span>` : ''}</div>
                     <div class="rp-message-text"></div>
                 </div>
             `;
@@ -1833,23 +4484,158 @@ class RPUIController {
             const textDiv = assistantMsgDiv.querySelector('.rp-message-text');
             let fullContent = '';
 
-            // stream response
             for await (const chunk of stream) {
                 fullContent += chunk;
                 textDiv.innerHTML = this.formatMessage(fullContent);
                 this.scrollToBottom();
             }
 
-            // save assistant message
             this.rp.saveAssistantMessage(fullContent);
 
-            // remove streaming class
+            // store this response in the cache (skip if it was already a cache hit)
+            if (!cacheHit) {
+                this.rp.cacheLastAssistantResponse({
+                    text: _cacheText,
+                    response: fullContent,
+                    embedding: _cachePrecomputedEmbedding
+                }).catch(() => {});
+            }
+
+            // auto-summarize when context is large
+            this.maybeAutoSummarize();
+
+            // best-effort memory extraction
+            this.rp.maybeExtractMemoriesAsync();
+
             assistantMsgDiv.classList.remove('rp-message-streaming');
+            this.renderChat();
 
         } catch (error) {
             console.error('[rp] send message error:', error);
             showToast?.('error: ' + error.message);
         }
+    }
+
+    // ---- summarization modal ----
+    async showSummarizeModal() {
+        if (!this.rp.currentCharacter) { showToast?.('select a character first'); return; }
+        const history = this.rp.chatHistory;
+        if (history.length === 0) { showToast?.('nothing to summarize'); return; }
+
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body">
+                <h3>summarize conversation</h3>
+                <p>condense the chat so far into a short recap. you can replace older messages with the recap or keep it as a separate note.</p>
+                <div class="rp-summary-actions">
+                    <button class="rp-btn" id="rp-summary-gen">generate summary</button>
+                </div>
+                <textarea id="rp-summary-text" rows="8" placeholder="summary will appear here..."></textarea>
+                <div class="rp-summary-actions">
+                    <label class="rp-summary-replace-row">
+                        replace first
+                        <input type="number" id="rp-summary-count" min="1" max="${history.length}" value="${Math.min(20, history.length)}" style="width:80px;">
+                        messages
+                    </label>
+                </div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-summary-cancel">cancel</button>
+                    <button class="rp-btn" id="rp-summary-append">keep as recap</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-summary-replace">replace messages</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => modal.remove());
+        document.body.appendChild(modal);
+        document.getElementById('rp-summary-cancel').addEventListener('click', () => modal.remove());
+        document.getElementById('rp-summary-gen').addEventListener('click', async () => {
+            const btn = document.getElementById('rp-summary-gen');
+            btn.disabled = true; btn.textContent = 'generating...';
+            try {
+                const summary = await this.rp.summarizeMessages(history);
+                document.getElementById('rp-summary-text').value = summary;
+            } catch (e) {
+                showToast?.('summarize failed: ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = 'generate summary';
+            }
+        });
+        document.getElementById('rp-summary-append').addEventListener('click', () => {
+            const txt = document.getElementById('rp-summary-text').value.trim();
+            if (!txt) { showToast?.('generate a summary first'); return; }
+            this.rp.applySummaryAppend(txt);
+            modal.remove();
+            this.renderChat();
+            showToast?.('summary appended');
+        });
+        document.getElementById('rp-summary-replace').addEventListener('click', () => {
+            const txt = document.getElementById('rp-summary-text').value.trim();
+            if (!txt) { showToast?.('generate a summary first'); return; }
+            const count = parseInt(document.getElementById('rp-summary-count').value, 10) || 1;
+            this.rp.applySummaryReplace(txt, count);
+            modal.remove();
+            this.renderChat();
+            showToast?.('summary replaced ' + count + ' messages');
+        });
+    }
+
+    // when chat tokens exceed the configured threshold, prompt to auto-summarize.
+    async maybeAutoSummarize() {
+        const enabled = this.rp.storage.getSetting('autoSummarize', false);
+        if (!enabled) return;
+        const threshold = this.rp.storage.getSetting('autoSummarizeThreshold', 6000);
+        const tokens = this.rp.estimateChatTokens();
+        if (tokens < threshold) return;
+        // pull out the older 60% of messages for summarization
+        const cutoff = Math.floor(this.rp.chatHistory.length * 0.6);
+        if (cutoff < 4) return;
+        const older = this.rp.chatHistory.slice(0, cutoff);
+        try {
+            showToast?.('auto-summarizing older messages...');
+            const summary = await this.rp.summarizeMessages(older);
+            this.rp.applySummaryReplace(summary, cutoff);
+        } catch (e) {
+            console.warn('[rp] auto-summarize failed:', e);
+        }
+    }
+
+    // ---- quick reply bar ----
+    renderQuickReplyBar() {
+        let bar = document.getElementById('rp-quick-replies');
+        if (!bar) {
+            // create the bar above the input container
+            const container = document.querySelector('.rp-chat-input-container');
+            if (!container) return;
+            bar = document.createElement('div');
+            bar.id = 'rp-quick-replies';
+            bar.className = 'rp-quick-replies';
+            container.parentNode.insertBefore(bar, container);
+        }
+        bar.innerHTML = '';
+        const replies = this.rp.getActiveQuickReplies();
+        if (replies.length === 0) { bar.style.display = 'none'; return; }
+        bar.style.display = '';
+        for (const r of replies) {
+            const chip = document.createElement('button');
+            chip.className = 'rp-quick-reply';
+            chip.textContent = r.label || r.text.slice(0, 24);
+            chip.title = r.text;
+            chip.addEventListener('click', () => {
+                const input = this.elements.chatInput;
+                if (!input) return;
+                input.value = r.text;
+                if (r.sendImmediately) this.sendMessage();
+                else input.focus();
+            });
+            bar.appendChild(chip);
+        }
+        // edit button at the end
+        const editBtn = document.createElement('button');
+        editBtn.className = 'rp-quick-reply rp-quick-reply-edit';
+        editBtn.textContent = '+ manage';
+        editBtn.addEventListener('click', () => this.showQuickReplyManager());
+        bar.appendChild(editBtn);
     }
 
     async regenerateLastMessage() {
@@ -1893,37 +4679,148 @@ class RPUIController {
 
             // set input and send
             this.elements.chatInput.value = lastUserMsg.content;
-            this.pendingImages = lastUserMsg.images || [];
+            this.pendingImages = (lastUserMsg.images || []).map(u => ({ kind: 'image', url: u, name: '' }));
+            this.renderAttachmentTray();
             await this.sendMessage();
         }
     }
 
-    handleImageAttach(e) {
-        const file = e.target.files[0];
-        if (!file) return;
+    // accepts one or many images (multiple input). validates each, converts to data url,
+    // pushes into pendingImages, and refreshes the preview tray.
+    async handleImageAttach(e) {
+        const files = Array.from(e.target.files || []);
+        if (files.length === 0) return;
 
-        // validate image
-        if (!file.type.startsWith('image/')) {
-            showToast?.('please select an image file');
-            return;
+        const maxSize = 1024 * 1024; // 1mb per image (kimi can handle reasonable sizes)
+        this.pendingImages = this.pendingImages || [];
+        let added = 0;
+        let rejected = 0;
+
+        for (const file of files) {
+            if (!file.type.startsWith('image/')) { rejected++; continue; }
+            if (file.size > maxSize) { rejected++; continue; }
+            try {
+                const dataUrl = await this.rp.fileToDataUrl(file);
+                this.pendingImages.push({ kind: 'image', url: dataUrl, name: file.name });
+                added++;
+            } catch (err) {
+                rejected++;
+            }
         }
-
-        // enforce 500KB file size limit to prevent localStorage quota errors
-        const maxSize = 500 * 1024; // 500KB
-        if (file.size > maxSize) {
-            showToast?.('image must be under 500kb to prevent storage errors');
-            return;
-        }
-
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            this.pendingImages = this.pendingImages || [];
-            this.pendingImages.push(e.target.result);
-            showToast?.('image attached');
-        };
-        reader.readAsDataURL(file);
 
         e.target.value = '';
+        if (added > 0) showToast?.(`attached ${added} image${added === 1 ? '' : 's'}`);
+        if (rejected > 0) showToast?.(`${rejected} file${rejected === 1 ? '' : 's'} skipped (too large or wrong type)`);
+        this.renderAttachmentTray();
+    }
+
+    // extracts the first frame of a video as an image and attaches it.
+    // kimi cannot consume video natively, so this is the simplest reasonable bridge.
+    async handleVideoAttach(e) {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        if (!file.type.startsWith('video/')) {
+            showToast?.('please select a video file');
+            return;
+        }
+        // 5mb safety cap on the source video; the extracted frame is far smaller
+        if (file.size > 5 * 1024 * 1024) {
+            showToast?.('video must be under 5mb (we extract a single frame)');
+            return;
+        }
+        try {
+            const frame = await this.extractVideoFrame(file);
+            this.pendingImages = this.pendingImages || [];
+            this.pendingImages.push({ kind: 'video-frame', url: frame, name: file.name + ' (frame)' });
+            showToast?.('attached first frame of video (experimental)');
+            this.renderAttachmentTray();
+        } catch (err) {
+            console.error('[rp] video frame extraction failed:', err);
+            showToast?.('could not extract a frame from that video');
+        }
+    }
+
+    // extracts a single frame (around 1s in) from a video file as a jpeg data url
+    extractVideoFrame(file) {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.muted = true;
+            video.playsInline = true;
+            const cleanup = () => { URL.revokeObjectURL(url); video.removeAttribute('src'); video.load(); };
+            video.onloadedmetadata = () => {
+                // seek to 1 second or the middle, whichever is sooner
+                const target = Math.min(1, Math.max(0, (video.duration || 0) * 0.1));
+                video.currentTime = target;
+            };
+            video.onseeked = () => {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = video.videoWidth || 320;
+                    canvas.height = video.videoHeight || 240;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                    cleanup();
+                    resolve(dataUrl);
+                } catch (e) {
+                    cleanup();
+                    reject(e);
+                }
+            };
+            video.onerror = () => { cleanup(); reject(new Error('video load failed')); };
+            video.src = url;
+        });
+    }
+
+    // renders thumbnails for pending attachments with a remove (×) button each.
+    renderAttachmentTray() {
+        const tray = this.elements.attachmentTray;
+        if (!tray) return;
+        const items = this.pendingImages || [];
+        if (items.length === 0) {
+            tray.innerHTML = '';
+            tray.classList.add('hidden');
+            return;
+        }
+        tray.classList.remove('hidden');
+        tray.innerHTML = '';
+        items.forEach((item, idx) => {
+            // backward-compat: items might be plain data url strings from legacy code paths
+            const url = typeof item === 'string' ? item : item.url;
+            const label = typeof item === 'string' ? '' : (item.name || '');
+            const thumb = document.createElement('div');
+            thumb.className = 'rp-attachment-thumb';
+            thumb.title = label || 'image attachment';
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = label || 'attachment';
+            thumb.appendChild(img);
+            const rm = document.createElement('button');
+            rm.className = 'rp-attachment-remove';
+            rm.type = 'button';
+            rm.setAttribute('aria-label', 'remove attachment');
+            rm.textContent = '×';
+            rm.addEventListener('click', () => {
+                this.pendingImages.splice(idx, 1);
+                this.renderAttachmentTray();
+            });
+            thumb.appendChild(rm);
+            tray.appendChild(thumb);
+        });
+    }
+
+    // normalize the pendingImages array into plain data-url strings, since that is the
+    // shape ChatMessage.images expects and the api client serializes into image_url.
+    consumePendingAttachmentUrls() {
+        const out = [];
+        for (const item of (this.pendingImages || [])) {
+            if (typeof item === 'string') out.push(item);
+            else if (item && item.url) out.push(item.url);
+        }
+        return out;
     }
 
     async handleImport(e) {
@@ -2018,6 +4915,18 @@ class RPUIController {
                     <input type="text" id="rp-char-tags" value="${(character?.tags || []).join(', ')}" placeholder="tag1, tag2, tag3">
                 </div>
 
+                <div class="rp-form-group">
+                    <label>expressions <small>(emoji-style mood avatars for this character)</small></label>
+                    <div id="rp-char-expressions"></div>
+                    <button type="button" class="rp-btn" id="rp-char-add-expression">+ add expression</button>
+                </div>
+
+                <div class="rp-form-group">
+                    <label>lorebook entries <small>(world info injected when keywords appear)</small></label>
+                    <div id="rp-char-lorebook"></div>
+                    <button type="button" class="rp-btn" id="rp-char-add-lore">+ add lore entry</button>
+                </div>
+
                 <div class="rp-form-actions">
                     <button class="rp-btn" id="rp-editor-cancel">cancel</button>
                     <button class="rp-btn rp-btn-primary" id="rp-editor-save">
@@ -2026,6 +4935,125 @@ class RPUIController {
                 </div>
             </div>
         `;
+
+        // working copies of expression and lorebook arrays
+        let expressions = (character?.expressions || []).map(e => Object.assign({}, e));
+        let embeddedLorebook = (character?.embeddedLorebook || []).map(e => Object.assign({}, e));
+
+        const renderExpressions = () => {
+            const root = document.getElementById('rp-char-expressions');
+            if (!root) return;
+            root.innerHTML = '';
+            if (expressions.length === 0) {
+                const hint = document.createElement('div');
+                hint.className = 'rp-empty-desc';
+                hint.style.padding = '0.5rem 0';
+                hint.textContent = 'no expressions yet. add one to enable mood-based avatar switching.';
+                root.appendChild(hint);
+            }
+            expressions.forEach((exp, idx) => {
+                const row = document.createElement('div');
+                row.className = 'rp-expression-row';
+                row.innerHTML = `
+                    <div class="rp-persona-avatar" style="background-image: url('${(exp.avatarUrl || '').replace(/'/g, "\\'")}')">${!exp.avatarUrl ? '🎭' : ''}</div>
+                    <input type="text" placeholder="name (e.g. happy)" value="${this.escapeHtml(exp.name || '')}" data-field="name">
+                    <input type="text" placeholder="trigger keywords (comma-separated)" value="${this.escapeHtml((exp.triggers || []).join(', '))}" data-field="triggers">
+                    <input type="file" accept="image/*" class="hidden" data-field="file">
+                    <button type="button" class="rp-btn" data-action="upload">upload</button>
+                    <button type="button" class="rp-action-btn rp-action-delete" data-action="remove">🗑️</button>`;
+                row.querySelector('[data-field="name"]').addEventListener('input', e => { expressions[idx].name = e.target.value; });
+                row.querySelector('[data-field="triggers"]').addEventListener('input', e => {
+                    expressions[idx].triggers = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+                });
+                const fileEl = row.querySelector('[data-field="file"]');
+                row.querySelector('[data-action="upload"]').addEventListener('click', () => fileEl.click());
+                fileEl.addEventListener('change', async (e) => {
+                    const f = e.target.files[0]; if (!f) return;
+                    if (f.size > 500 * 1024) { showToast?.('avatar must be under 500kb'); return; }
+                    expressions[idx].avatarUrl = await this.rp.fileToDataUrl(f);
+                    renderExpressions();
+                });
+                row.querySelector('[data-action="remove"]').addEventListener('click', () => {
+                    expressions.splice(idx, 1); renderExpressions();
+                });
+                root.appendChild(row);
+            });
+        };
+        renderExpressions();
+
+        const renderLoreList = () => {
+            const root = document.getElementById('rp-char-lorebook');
+            if (!root) return;
+            root.innerHTML = '';
+            if (embeddedLorebook.length === 0) {
+                const hint = document.createElement('div');
+                hint.className = 'rp-empty-desc';
+                hint.style.padding = '0.5rem 0';
+                hint.textContent = 'no entries yet. add one to inject world info when keywords appear.';
+                root.appendChild(hint);
+            }
+            embeddedLorebook.forEach((entry, idx) => {
+                const row = document.createElement('div');
+                row.className = 'rp-lore-row';
+                row.innerHTML = `
+                    <div class="rp-lore-row-top">
+                        <input type="text" placeholder="comment / title" value="${this.escapeHtml(entry.comment || '')}" data-field="comment">
+                        <label class="rp-lore-toggle"><input type="checkbox" data-field="enabled" ${entry.enabled !== false ? 'checked' : ''}> enabled</label>
+                        <button type="button" class="rp-action-btn rp-action-delete" data-action="remove">🗑️</button>
+                    </div>
+                    <div class="rp-lore-row-keys">
+                        <input type="text" placeholder="primary keys (comma-separated, /regex/ ok)" value="${this.escapeHtml((entry.keys || []).join(', '))}" data-field="keys">
+                        <input type="text" placeholder="secondary keys" value="${this.escapeHtml((entry.secondaryKeys || []).join(', '))}" data-field="secondaryKeys">
+                    </div>
+                    <textarea rows="3" placeholder="content to inject..." data-field="content">${this.escapeHtml(entry.content || '')}</textarea>
+                    <div class="rp-lore-row-meta">
+                        <label>position
+                            <select data-field="position">
+                                <option value="before" ${entry.position==='before'?'selected':''}>before sysprompt</option>
+                                <option value="after" ${entry.position==='after'?'selected':''}>after sysprompt</option>
+                                <option value="system" ${entry.position==='system'?'selected':''}>system message</option>
+                                <option value="an" ${entry.position==='an'?'selected':''}>author's note</option>
+                            </select>
+                        </label>
+                        <label>order <input type="number" value="${entry.order ?? 0}" data-field="order" style="width:70px;"></label>
+                        <label>priority <input type="number" value="${entry.priority ?? 0}" data-field="priority" style="width:70px;"></label>
+                        <label>prob% <input type="number" min="0" max="100" value="${entry.probability ?? 100}" data-field="probability" style="width:70px;"></label>
+                        <label><input type="checkbox" data-field="constant" ${entry.constant?'checked':''}> constant</label>
+                        <label><input type="checkbox" data-field="selective" ${entry.selective?'checked':''}> selective</label>
+                        <label><input type="checkbox" data-field="caseSensitive" ${entry.caseSensitive?'checked':''}> case-sensitive</label>
+                    </div>`;
+                const bind = (selector, fn) => row.querySelectorAll(selector).forEach(fn);
+                bind('input[data-field], select[data-field], textarea[data-field]', el => {
+                    el.addEventListener('input', e => {
+                        const f = e.target.dataset.field;
+                        let v = e.target.value;
+                        if (e.target.type === 'checkbox') v = e.target.checked;
+                        if (f === 'keys' || f === 'secondaryKeys') v = v.split(',').map(s => s.trim()).filter(Boolean);
+                        if (f === 'order' || f === 'priority' || f === 'probability') v = parseInt(v, 10) || 0;
+                        embeddedLorebook[idx][f] = v;
+                    });
+                    el.addEventListener('change', e => {
+                        if (e.target.type === 'checkbox') {
+                            embeddedLorebook[idx][e.target.dataset.field] = e.target.checked;
+                        }
+                    });
+                });
+                row.querySelector('[data-action="remove"]').addEventListener('click', () => {
+                    embeddedLorebook.splice(idx, 1); renderLoreList();
+                });
+                root.appendChild(row);
+            });
+        };
+        renderLoreList();
+
+        document.getElementById('rp-char-add-expression')?.addEventListener('click', () => {
+            expressions.push({ name: '', avatarUrl: '', triggers: [] });
+            renderExpressions();
+        });
+        document.getElementById('rp-char-add-lore')?.addEventListener('click', () => {
+            embeddedLorebook.push(new LorebookEntry({ keys: [], content: '', enabled: true }));
+            renderLoreList();
+        });
 
         // store avatar for saving
         let avatarUrl = character?.avatarUrl || '';
@@ -2081,7 +5109,12 @@ class RPUIController {
                 mesExample: document.getElementById('rp-char-mes-example')?.value || '',
                 systemPrompt: document.getElementById('rp-char-system-prompt')?.value || '',
                 tags: (document.getElementById('rp-char-tags')?.value || '').split(',').map(t => t.trim()).filter(t => t),
-                avatarUrl
+                avatarUrl,
+                // strip empty rows
+                expressions: expressions.filter(e => e.name && e.name.trim()),
+                embeddedLorebook: embeddedLorebook
+                    .filter(e => (e.keys && e.keys.length > 0) || e.constant)
+                    .map(e => new LorebookEntry(e))
             };
 
             if (isNew) {
@@ -2094,6 +5127,423 @@ class RPUIController {
 
             this.showView('characterGrid');
             this.renderCharacterGrid();
+        });
+    }
+
+    // ---- memory panel ----
+    toggleMemoryPanel() {
+        let panel = document.getElementById('rp-memory-panel');
+        if (panel && panel.classList.contains('open')) {
+            panel.classList.remove('open');
+            setTimeout(() => panel.remove(), 250);
+            return;
+        }
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'rp-memory-panel';
+            panel.className = 'rp-memory-panel';
+            document.body.appendChild(panel);
+        }
+        this.renderMemoryPanel(panel);
+        requestAnimationFrame(() => panel.classList.add('open'));
+    }
+
+    renderMemoryPanel(panel) {
+        const isGroup = !!this.rp.currentGroup;
+        const cid = isGroup ? this.rp.currentGroup?.id : this.rp.currentCharacter?.id;
+        const pid = this.rp.currentPersona?.id || null;
+        const scopeKey = cid ? ('character:' + cid) : 'global';
+        const personaScopeKey = pid ? ('persona:' + pid) : null;
+        const autoEnabled = this.rp.storage.getSetting('autoMemoryEnabled', false);
+
+        panel.innerHTML = `
+            <div class="rp-memory-panel-header">
+                <h3>🧠 memories</h3>
+                <div class="rp-memory-panel-actions">
+                    <label class="rp-switch">
+                        <input type="checkbox" id="rp-auto-memory" ${autoEnabled ? 'checked' : ''}>
+                        <span>auto-extract</span>
+                    </label>
+                    <button class="rp-action-btn" id="rp-mem-extract" title="extract from chat">+ extract</button>
+                    <button class="rp-action-btn" id="rp-mem-add" title="add manually">+ add</button>
+                    <button class="rp-action-btn" id="rp-mem-close" title="close">✕</button>
+                </div>
+            </div>
+            <div class="rp-memory-list" id="rp-memory-list"></div>`;
+
+        const listEl = panel.querySelector('#rp-memory-list');
+        const renderList = () => {
+            listEl.innerHTML = '';
+            // group by scope for clarity
+            const sections = [
+                { title: 'character', scope: scopeKey, items: this.rp.storage.getMemories(scopeKey) }
+            ];
+            if (personaScopeKey) sections.push({ title: 'persona', scope: personaScopeKey, items: this.rp.storage.getMemories(personaScopeKey) });
+            sections.push({ title: 'global', scope: 'global', items: this.rp.storage.getMemories('global') });
+
+            let totalItems = 0;
+            for (const sec of sections) {
+                if (!sec.items || sec.items.length === 0) continue;
+                const heading = document.createElement('div');
+                heading.className = 'rp-memory-section-title';
+                heading.textContent = sec.title + ' (' + sec.items.length + ')';
+                listEl.appendChild(heading);
+                for (const m of sec.items) {
+                    totalItems++;
+                    const item = document.createElement('div');
+                    item.className = 'rp-memory-item' + (m.locked ? ' locked' : '');
+                    const ta = document.createElement('textarea');
+                    ta.rows = 2;
+                    ta.value = m.content;
+                    ta.addEventListener('blur', () => {
+                        this.rp.storage.updateMemory(m.id, { content: ta.value.toLowerCase() }, sec.scope);
+                    });
+                    item.appendChild(ta);
+                    const meta = document.createElement('div');
+                    meta.className = 'rp-memory-item-meta';
+                    const src = document.createElement('span');
+                    src.className = 'rp-memory-source-' + m.source;
+                    src.textContent = m.source;
+                    meta.appendChild(src);
+                    const conf = document.createElement('span');
+                    conf.textContent = `conf ${(m.confidence || 0).toFixed(2)}`;
+                    meta.appendChild(conf);
+                    const actions = document.createElement('div');
+                    actions.className = 'rp-memory-item-actions';
+                    const lockBtn = document.createElement('button');
+                    lockBtn.className = 'rp-action-btn';
+                    lockBtn.title = m.locked ? 'unlock' : 'lock';
+                    lockBtn.textContent = m.locked ? '🔓' : '🔒';
+                    lockBtn.addEventListener('click', () => {
+                        this.rp.storage.updateMemory(m.id, { locked: !m.locked }, sec.scope);
+                        renderList();
+                    });
+                    actions.appendChild(lockBtn);
+                    const del = document.createElement('button');
+                    del.className = 'rp-action-btn rp-action-delete';
+                    del.title = 'delete';
+                    del.textContent = '🗑️';
+                    del.addEventListener('click', () => {
+                        if (confirm('delete memory?')) {
+                            this.rp.storage.deleteMemory(m.id, sec.scope);
+                            renderList();
+                        }
+                    });
+                    actions.appendChild(del);
+                    meta.appendChild(actions);
+                    item.appendChild(meta);
+                    listEl.appendChild(item);
+                }
+            }
+            if (totalItems === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'rp-empty-desc';
+                empty.style.padding = '0.5rem';
+                empty.textContent = 'no memories yet. enable auto-extract or click + add to create one.';
+                listEl.appendChild(empty);
+            }
+        };
+        renderList();
+
+        panel.querySelector('#rp-auto-memory').addEventListener('change', (e) => {
+            this.rp.storage.setSetting('autoMemoryEnabled', e.target.checked);
+            showToast?.(e.target.checked ? 'auto-memory enabled' : 'auto-memory disabled');
+        });
+        panel.querySelector('#rp-mem-add').addEventListener('click', () => {
+            const text = prompt('memory text (will be lowercased):');
+            if (!text) return;
+            this.rp.storage.addMemory({ content: text.toLowerCase(), source: 'manual', confidence: 1 }, scopeKey);
+            renderList();
+        });
+        panel.querySelector('#rp-mem-extract').addEventListener('click', async () => {
+            const btn = panel.querySelector('#rp-mem-extract');
+            btn.disabled = true; btn.textContent = 'extracting...';
+            try {
+                const added = await this.rp.extractMemories({ scopeKey });
+                showToast?.(`extracted ${added.length} memor${added.length === 1 ? 'y' : 'ies'}`);
+            } catch (e) {
+                showToast?.('extraction failed: ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = '+ extract';
+                renderList();
+            }
+        });
+        panel.querySelector('#rp-mem-close').addEventListener('click', () => this.toggleMemoryPanel());
+    }
+
+    // ---- macros modal ----
+    async showMacrosModal() {
+        const toggles = this.rp.macros.getToggles();
+        const custom = this.rp.macros.getCustomMacros();
+        // optionally refresh location/weather snapshots so the preview is meaningful
+        if (toggles.location && this.rp.storage.getSetting('macroLocationAuto', false)) {
+            this.rp.macros.refreshLocation().catch(() => {});
+        }
+        if (toggles.weather && this.rp.storage.getSetting('macroWeatherAuto', false)) {
+            this.rp.macros.refreshWeather().catch(() => {});
+        }
+
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body">
+                <h3>🪄 macros</h3>
+                <p>insert <code>{{name}}</code> placeholders anywhere in your character / lorebook / messages and they'll be expanded at send time. disabled macros are left as-is.</p>
+                <div id="rp-macros-builtins"></div>
+                <h4 style="color:#f5af12;margin:0.5rem 0;">custom macros</h4>
+                <div id="rp-macros-custom"></div>
+                <button class="rp-btn" id="rp-macros-add-custom">+ add custom</button>
+                <div class="rp-form-group">
+                    <label>time format</label>
+                    <select id="rp-macros-time-fmt">
+                        <option value="24h" ${this.rp.storage.getSetting('macroTimeFormat','24h')==='24h'?'selected':''}>24h</option>
+                        <option value="12h" ${this.rp.storage.getSetting('macroTimeFormat','24h')==='12h'?'selected':''}>12h</option>
+                    </select>
+                </div>
+                <div class="rp-form-group">
+                    <label><input type="checkbox" id="rp-macros-geo" ${this.rp.storage.getSetting('macroLocationAuto', false)?'checked':''}> request browser geolocation for {{location}}</label>
+                </div>
+                <div class="rp-form-group">
+                    <label><input type="checkbox" id="rp-macros-weather" ${this.rp.storage.getSetting('macroWeatherAuto', false)?'checked':''}> fetch {{weather}} via wttr.in</label>
+                </div>
+                <div class="rp-form-group">
+                    <label>preview</label>
+                    <textarea id="rp-macros-sample" rows="3">hi {{char}}, it is {{time}} on {{date}}. i am at {{location}}. random {{random:1-100}}.</textarea>
+                    <div class="rp-macro-preview" id="rp-macros-preview"></div>
+                </div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-macros-reset">reset toggles</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-macros-close">done</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => modal.remove());
+        document.body.appendChild(modal);
+
+        const builtins = modal.querySelector('#rp-macros-builtins');
+        const sampleValues = {
+            time: new Date().toLocaleTimeString(),
+            date: new Date().toLocaleDateString(),
+            datetime: new Date().toLocaleString(),
+            location: 'unknown location',
+            user: this.rp.currentPersona?.name || 'user',
+            char: this.rp.currentCharacter?.name || 'character',
+            weather: 'weather unavailable',
+            random: 'random number'
+        };
+        for (const name of MacroEngine.BUILT_INS) {
+            const row = document.createElement('div');
+            row.className = 'rp-macro-row';
+            row.innerHTML = `
+                <span class="rp-macro-name">{{${name}}}</span>
+                <span class="rp-macro-value">${this.escapeHtml(sampleValues[name] || '')}</span>
+                <input type="checkbox" class="rp-macro-toggle" data-name="${name}" ${toggles[name] ? 'checked' : ''}>`;
+            row.querySelector('.rp-macro-toggle').addEventListener('change', (e) => {
+                this.rp.macros.setToggle(name, e.target.checked);
+                refreshPreview();
+            });
+            builtins.appendChild(row);
+        }
+
+        const customRoot = modal.querySelector('#rp-macros-custom');
+        const customObj = Object.assign({}, custom);
+        const renderCustom = () => {
+            customRoot.innerHTML = '';
+            for (const [k, v] of Object.entries(customObj)) {
+                const row = document.createElement('div');
+                row.className = 'rp-custom-macro-row';
+                row.innerHTML = `
+                    <input type="text" placeholder="name (no spaces)" value="${this.escapeHtml(k)}" data-role="name">
+                    <input type="text" placeholder="value" value="${this.escapeHtml(v)}" data-role="value">
+                    <button class="rp-action-btn rp-action-delete" data-action="del">🗑️</button>`;
+                row.querySelector('[data-role="name"]').addEventListener('change', (e) => {
+                    const newK = e.target.value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+                    if (newK && newK !== k) {
+                        customObj[newK] = customObj[k];
+                        delete customObj[k];
+                        this.rp.macros.setCustomMacros(customObj);
+                        renderCustom();
+                    }
+                });
+                row.querySelector('[data-role="value"]').addEventListener('change', (e) => {
+                    customObj[k] = e.target.value;
+                    this.rp.macros.setCustomMacros(customObj);
+                    refreshPreview();
+                });
+                row.querySelector('[data-action="del"]').addEventListener('click', () => {
+                    delete customObj[k];
+                    this.rp.macros.setCustomMacros(customObj);
+                    renderCustom();
+                    refreshPreview();
+                });
+                customRoot.appendChild(row);
+            }
+        };
+        renderCustom();
+
+        modal.querySelector('#rp-macros-add-custom').addEventListener('click', () => {
+            let name = prompt('custom macro name (no spaces, e.g. "my_var"):');
+            if (!name) return;
+            name = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+            const value = prompt('value:') || '';
+            customObj[name] = value;
+            this.rp.macros.setCustomMacros(customObj);
+            renderCustom();
+            refreshPreview();
+        });
+
+        modal.querySelector('#rp-macros-time-fmt').addEventListener('change', (e) => {
+            this.rp.storage.setSetting('macroTimeFormat', e.target.value);
+            refreshPreview();
+        });
+        modal.querySelector('#rp-macros-geo').addEventListener('change', async (e) => {
+            this.rp.storage.setSetting('macroLocationAuto', e.target.checked);
+            if (e.target.checked) await this.rp.macros.refreshLocation();
+            refreshPreview();
+        });
+        modal.querySelector('#rp-macros-weather').addEventListener('change', async (e) => {
+            this.rp.storage.setSetting('macroWeatherAuto', e.target.checked);
+            if (e.target.checked) await this.rp.macros.refreshWeather();
+            refreshPreview();
+        });
+
+        const sampleEl = modal.querySelector('#rp-macros-sample');
+        const previewEl = modal.querySelector('#rp-macros-preview');
+        const refreshPreview = () => {
+            const expanded = this.rp.macros.expand(sampleEl.value, {
+                user: this.rp.currentPersona?.name || 'user',
+                char: this.rp.currentCharacter?.name || 'character'
+            });
+            previewEl.textContent = expanded;
+        };
+        sampleEl.addEventListener('input', refreshPreview);
+        refreshPreview();
+
+        modal.querySelector('#rp-macros-reset').addEventListener('click', () => {
+            this.rp.storage.setSetting('macroToggles', {});
+            showToast?.('macros reset to defaults');
+            modal.remove();
+        });
+        modal.querySelector('#rp-macros-close').addEventListener('click', () => modal.remove());
+    }
+
+    // ---- quick reply manager ----
+    showQuickReplyManager() {
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        const sets = this.rp.storage.getAllQuickReplySets();
+        const allChars = this.rp.storage.getAllCharacters();
+        const allGroups = this.rp.storage.getAllGroups();
+
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body rp-qr-manager">
+                <h3>quick reply manager</h3>
+                <div id="rp-qr-sets"></div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-qr-new">+ new set</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-qr-close">done</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => { modal.remove(); this.renderChat(); });
+        document.body.appendChild(modal);
+        document.getElementById('rp-qr-close').addEventListener('click', () => { modal.remove(); this.renderChat(); });
+
+        const root = document.getElementById('rp-qr-sets');
+        const renderAll = () => {
+            root.innerHTML = '';
+            const allSets = this.rp.storage.getAllQuickReplySets();
+            if (allSets.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'rp-empty-desc';
+                empty.style.padding = '0.75rem 0';
+                empty.textContent = 'no quick reply sets yet. create one to add reusable chat snippets.';
+                root.appendChild(empty);
+            }
+            for (const s of allSets) {
+                const card = document.createElement('div');
+                card.className = 'rp-qr-set';
+                let scopeOptions = `<option value="global" ${s.scope==='global'?'selected':''}>global</option>
+                                    <option value="character" ${s.scope==='character'?'selected':''}>character</option>
+                                    <option value="group" ${s.scope==='group'?'selected':''}>group</option>`;
+                card.innerHTML = `
+                    <div class="rp-qr-set-header">
+                        <input type="text" data-field="name" value="${this.escapeHtml(s.name)}" placeholder="set name">
+                        <select data-field="scope">${scopeOptions}</select>
+                        <select data-field="scopeId"></select>
+                        <label><input type="checkbox" data-field="enabled" ${s.enabled?'checked':''}> on</label>
+                        <button type="button" class="rp-action-btn rp-action-delete" data-action="del">🗑️</button>
+                    </div>
+                    <div class="rp-qr-replies"></div>
+                    <button type="button" class="rp-btn" data-action="addReply">+ reply</button>`;
+                const scopeIdEl = card.querySelector('[data-field="scopeId"]');
+                const populateScopeId = () => {
+                    scopeIdEl.innerHTML = '';
+                    const opts = s.scope === 'character' ? allChars : (s.scope === 'group' ? allGroups : []);
+                    if (s.scope === 'global') {
+                        scopeIdEl.innerHTML = '<option value="">(n/a)</option>';
+                        scopeIdEl.disabled = true;
+                    } else {
+                        scopeIdEl.disabled = false;
+                        scopeIdEl.innerHTML = '<option value="">(none)</option>' + opts.map(o => `<option value="${this.escapeHtml(o.id)}" ${s.scopeId===o.id?'selected':''}>${this.escapeHtml(o.name)}</option>`).join('');
+                    }
+                };
+                populateScopeId();
+
+                const repliesEl = card.querySelector('.rp-qr-replies');
+                const renderReplies = () => {
+                    repliesEl.innerHTML = '';
+                    s.replies.forEach((r, ri) => {
+                        const row = document.createElement('div');
+                        row.className = 'rp-qr-reply-row';
+                        row.innerHTML = `
+                            <input type="text" placeholder="label" value="${this.escapeHtml(r.label)}" data-field="label">
+                            <input type="text" placeholder="message text" value="${this.escapeHtml(r.text)}" data-field="text">
+                            <label class="rp-qr-send"><input type="checkbox" data-field="sendImmediately" ${r.sendImmediately?'checked':''}> send</label>
+                            <button type="button" class="rp-action-btn rp-action-delete" data-action="rmReply">🗑️</button>`;
+                        row.querySelector('[data-field="label"]').addEventListener('input', e => { r.label = e.target.value; });
+                        row.querySelector('[data-field="text"]').addEventListener('input', e => { r.text = e.target.value; });
+                        row.querySelector('[data-field="sendImmediately"]').addEventListener('change', e => { r.sendImmediately = e.target.checked; });
+                        row.querySelector('[data-action="rmReply"]').addEventListener('click', () => {
+                            s.replies.splice(ri, 1);
+                            this.rp.storage.saveQuickReplySet(s);
+                            renderReplies();
+                        });
+                        repliesEl.appendChild(row);
+                    });
+                };
+                renderReplies();
+
+                card.querySelector('[data-field="name"]').addEventListener('input', e => { s.name = e.target.value; });
+                card.querySelector('[data-field="scope"]').addEventListener('change', e => {
+                    s.scope = e.target.value;
+                    s.scopeId = null;
+                    populateScopeId();
+                    this.rp.storage.saveQuickReplySet(s);
+                });
+                scopeIdEl.addEventListener('change', e => { s.scopeId = e.target.value || null; });
+                card.querySelector('[data-field="enabled"]').addEventListener('change', e => { s.enabled = e.target.checked; });
+                card.querySelector('[data-action="del"]').addEventListener('click', () => {
+                    if (!confirm('delete this set?')) return;
+                    this.rp.storage.deleteQuickReplySet(s.id);
+                    renderAll();
+                });
+                card.querySelector('[data-action="addReply"]').addEventListener('click', () => {
+                    s.replies.push(new QuickReply({ label: '', text: '' }));
+                    renderReplies();
+                });
+                // save on every blur as well, for robustness
+                card.addEventListener('change', () => this.rp.storage.saveQuickReplySet(s));
+                card.addEventListener('blur', () => this.rp.storage.saveQuickReplySet(s), true);
+                root.appendChild(card);
+            }
+        };
+        renderAll();
+
+        document.getElementById('rp-qr-new').addEventListener('click', () => {
+            const ns = new QuickReplySet({ name: 'new set', scope: 'global', replies: [new QuickReply({ label: 'continue...', text: 'please continue.' })] });
+            this.rp.storage.saveQuickReplySet(ns);
+            renderAll();
         });
     }
 
@@ -2142,12 +5592,24 @@ class RPUIController {
 
                 <div class="rp-settings-section">
                     <h3>nvidia nim api</h3>
+                    ${keys._bundled ? `
+                    <div class="rp-sync-status rp-sync-connected">
+                        <span class="rp-sync-indicator"></span>
+                        <span>using bundled keys from .env (${(keys.nvidia || '').split(',').filter(Boolean).length} key(s) loaded at build time)</span>
+                    </div>
+                    <div class="rp-form-group">
+                        <label>api key(s)</label>
+                        <input type="password" id="rp-nvidia-key" value="" disabled placeholder="locked - rebuild from .env to change">
+                        <small>set NVIDIA_API_KEY_1, NVIDIA_API_KEY_2, ... in your .env, then <code>npm run build</code></small>
+                    </div>
+                    ` : `
                     <div class="rp-form-group">
                         <label>api key(s)</label>
                         <input type="password" id="rp-nvidia-key" value="${keys.nvidia || ''}"
                             placeholder="enter your nvidia nim api key (comma-separated for multiple)">
-                        <small>get your key at integrate.api.nvidia.com</small>
+                        <small>get your key at integrate.api.nvidia.com. tip: drop NVIDIA_API_KEY_1, ... in .env and run <code>npm run build</code> to bake them in.</small>
                     </div>
+                    `}
                 </div>
 
                 <div class="rp-settings-section">
@@ -2168,6 +5630,46 @@ class RPUIController {
                     <h3>personas</h3>
                     <div id="rp-persona-list"></div>
                     <button class="rp-btn" id="rp-add-persona">+ add persona</button>
+                </div>
+
+                <div class="rp-settings-section">
+                    <h3>lorebooks (user / character / world)</h3>
+                    <p style="color:#888;font-size:0.85rem;">manage world info shared across characters. character-embedded lore is edited from the character editor.</p>
+                    <button class="rp-btn" id="rp-open-lorebooks">📚 open lorebook manager</button>
+                </div>
+
+                <div class="rp-settings-section">
+                    <h3>memory</h3>
+                    <div class="rp-form-group">
+                        <label><input type="checkbox" id="rp-memory-enabled" ${this.rp.storage.getSetting('memoryEnabled', true) ? 'checked' : ''}> inject memories into prompts</label>
+                    </div>
+                    <div class="rp-form-group">
+                        <label><input type="checkbox" id="rp-auto-memory-enabled" ${this.rp.storage.getSetting('autoMemoryEnabled', false) ? 'checked' : ''}> auto-extract memories after every 4 assistant turns</label>
+                    </div>
+                    <div class="rp-form-group">
+                        <label>max memories injected per request</label>
+                        <input type="number" id="rp-memory-limit" min="1" max="20" value="${this.rp.storage.getSetting('memoryInjectionLimit', 8)}">
+                    </div>
+                </div>
+
+                <div class="rp-settings-section">
+                    <h3>semantic cache (nvidia embeddings)</h3>
+                    <div class="rp-form-group">
+                        <label><input type="checkbox" id="rp-cache-enabled" ${this.rp.storage.getSetting('semanticCacheEnabled', false) ? 'checked' : ''}> enable semantic caching</label>
+                        <small>uses nvidia/llama-nemotron-embed-vl-1b-v2. text-only messages are eligible. cache is per (character, persona).</small>
+                    </div>
+                    <div class="rp-form-group">
+                        <label>similarity threshold: <span id="rp-cache-thr-val">${this.rp.storage.getSetting('semanticCacheThreshold', 0.92)}</span></label>
+                        <input type="range" id="rp-cache-threshold" min="0.7" max="0.99" step="0.01" value="${this.rp.storage.getSetting('semanticCacheThreshold', 0.92)}">
+                    </div>
+                    <div class="rp-form-group">
+                        <label>ttl (days)</label>
+                        <input type="number" id="rp-cache-ttl" min="1" max="60" value="${this.rp.storage.getSetting('semanticCacheTTLDays', 7)}">
+                    </div>
+                    <div class="rp-settings-actions">
+                        <button class="rp-btn" id="rp-cache-clear">clear cache</button>
+                        <span id="rp-cache-stats" style="color:#888;font-size:0.85rem;align-self:center;"></span>
+                    </div>
                 </div>
 
                 <div class="rp-settings-section">
@@ -2198,7 +5700,10 @@ class RPUIController {
         });
 
         document.getElementById('rp-settings-save')?.addEventListener('click', () => {
-            const nvidiaKey = document.getElementById('rp-nvidia-key')?.value.trim();
+            const nvidiaInput = document.getElementById('rp-nvidia-key');
+            // skip nvidia key write when the input is disabled (bundled .env active)
+            // so we don't accidentally overwrite stored ui keys with an empty string
+            const nvidiaKey = nvidiaInput && !nvidiaInput.disabled ? nvidiaInput.value.trim() : null;
             const temperature = parseFloat(document.getElementById('rp-temperature')?.value) || 0.8;
             const maxTokens = parseInt(document.getElementById('rp-max-tokens')?.value) || 2048;
 
@@ -2213,7 +5718,11 @@ class RPUIController {
                 localStorage.setItem('llms_nocobase_key', nocobaseKey);
             }
 
-            this.rp.saveApiKeys({ nvidia: nvidiaKey });
+            // only persist the ui-supplied nvidia key when we actually read one
+            // (input wasn't disabled by the bundled-env path)
+            if (nvidiaKey !== null) {
+                this.rp.saveApiKeys({ nvidia: nvidiaKey });
+            }
             this.rp.storage.setSetting('temperature', temperature);
             this.rp.storage.setSetting('maxTokens', maxTokens);
 
@@ -2271,12 +5780,255 @@ class RPUIController {
                 localStorage.removeItem(RP_STORAGE_KEYS.CHATS);
                 localStorage.removeItem(RP_STORAGE_KEYS.SETTINGS);
                 localStorage.removeItem(RP_STORAGE_KEYS.LOREBOOKS);
+                localStorage.removeItem(RP_STORAGE_KEYS.MEMORIES);
+                localStorage.removeItem(RP_STORAGE_KEYS.LOREBOOK_META);
+                localStorage.removeItem(SemanticCache.STORAGE_KEY);
 
                 this.rp.storage.loadAll();
                 showToast?.('all data cleared');
                 this.showView('characterGrid');
                 this.renderCharacterGrid();
             }
+        });
+
+        // ---- lorebook manager ----
+        document.getElementById('rp-open-lorebooks')?.addEventListener('click', () => this.showLorebookManager());
+
+        // ---- memory settings ----
+        document.getElementById('rp-memory-enabled')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('memoryEnabled', e.target.checked);
+        });
+        document.getElementById('rp-auto-memory-enabled')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('autoMemoryEnabled', e.target.checked);
+        });
+        document.getElementById('rp-memory-limit')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('memoryInjectionLimit', Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 8)));
+        });
+
+        // ---- semantic cache settings ----
+        document.getElementById('rp-cache-enabled')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('semanticCacheEnabled', e.target.checked);
+            showToast?.(e.target.checked ? 'semantic cache on' : 'semantic cache off');
+        });
+        const thresholdEl = document.getElementById('rp-cache-threshold');
+        const thresholdValEl = document.getElementById('rp-cache-thr-val');
+        thresholdEl?.addEventListener('input', (e) => {
+            thresholdValEl.textContent = e.target.value;
+        });
+        thresholdEl?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('semanticCacheThreshold', parseFloat(e.target.value) || 0.92);
+        });
+        document.getElementById('rp-cache-ttl')?.addEventListener('change', (e) => {
+            this.rp.storage.setSetting('semanticCacheTTLDays', Math.max(1, Math.min(60, parseInt(e.target.value, 10) || 7)));
+        });
+        document.getElementById('rp-cache-clear')?.addEventListener('click', () => {
+            if (!confirm('clear all cached responses?')) return;
+            this.rp.semanticCache.clear();
+            showToast?.('cache cleared');
+            updateCacheStats();
+        });
+        const updateCacheStats = () => {
+            const s = this.rp.semanticCache.stats();
+            const el = document.getElementById('rp-cache-stats');
+            if (el) el.textContent = `${s.total} entries · ${(s.sizeBytes / 1024).toFixed(1)} kb`;
+        };
+        updateCacheStats();
+    }
+
+    // ---- lorebook manager modal (user / character / world) ----
+    showLorebookManager() {
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body" style="max-width:760px;">
+                <h3>📚 lorebook manager</h3>
+                <div class="rp-form-group">
+                    <label>filter</label>
+                    <select id="rp-lb-filter">
+                        <option value="all">all</option>
+                        <option value="user">user lorebooks</option>
+                        <option value="character">character lorebooks</option>
+                        <option value="world">world lorebook</option>
+                    </select>
+                </div>
+                <div id="rp-lb-list"></div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-lb-new-user">+ new user lorebook</button>
+                    <button class="rp-btn" id="rp-lb-new-character">+ new character lorebook</button>
+                    ${this.rp.storage.getWorldLorebookId() ? '' : '<button class="rp-btn" id="rp-lb-new-world">+ create world lorebook</button>'}
+                    <button class="rp-btn rp-btn-primary" id="rp-lb-close">done</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => modal.remove());
+        document.body.appendChild(modal);
+        document.getElementById('rp-lb-close').addEventListener('click', () => modal.remove());
+
+        const renderList = () => {
+            const root = modal.querySelector('#rp-lb-list');
+            root.innerHTML = '';
+            const filter = modal.querySelector('#rp-lb-filter').value;
+            const all = this.rp.storage.getAllLorebookMeta();
+            const filtered = filter === 'all' ? all : all.filter(m => m.type === filter);
+            if (filtered.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'rp-empty-desc';
+                empty.style.padding = '0.75rem 0';
+                empty.textContent = 'no lorebooks. character-embedded entries are edited in the character editor.';
+                root.appendChild(empty);
+                return;
+            }
+            for (const meta of filtered) {
+                const lb = this.rp.storage.getLorebook(meta.id) || [];
+                const card = document.createElement('div');
+                card.className = 'rp-qr-set';
+                const allPersonas = this.rp.storage.getAllPersonas();
+                const allChars = this.rp.storage.getAllCharacters();
+                const scopeOptions = meta.type === 'user'
+                    ? `<option value="">(none)</option>` + allPersonas.map(p => `<option value="${this.escapeHtml(p.id)}" ${meta.scopeId === p.id ? 'selected' : ''}>${this.escapeHtml(p.name)}</option>`).join('')
+                    : meta.type === 'character'
+                        ? `<option value="">(none)</option>` + allChars.map(c => `<option value="${this.escapeHtml(c.id)}" ${meta.scopeId === c.id ? 'selected' : ''}>${this.escapeHtml(c.name)}</option>`).join('')
+                        : `<option value="">(global)</option>`;
+                card.innerHTML = `
+                    <div class="rp-qr-set-header">
+                        <input type="text" data-field="name" value="${this.escapeHtml(meta.name)}" placeholder="lorebook name">
+                        <span class="rp-cache-badge">${meta.type}</span>
+                        <select data-field="scopeId" ${meta.type === 'world' ? 'disabled' : ''}>${scopeOptions}</select>
+                        <span style="color:#888;font-size:0.8rem;">${lb.length} entr${lb.length === 1 ? 'y' : 'ies'}</span>
+                        <button class="rp-action-btn rp-action-delete" data-action="del" title="delete">🗑️</button>
+                    </div>
+                    <div class="rp-lore-row-meta">
+                        <label>reality:
+                            <select data-field="realityType">
+                                <option value="fictional" ${meta.realityType === 'fictional' ? 'selected' : ''}>fictional world</option>
+                                <option value="realLife" ${meta.realityType === 'realLife' ? 'selected' : ''}>real life</option>
+                            </select>
+                        </label>
+                        <label>start: <input type="text" data-field="start" value="${this.escapeHtml(meta.timeframe?.start || '')}" placeholder="e.g. 1885 or medieval"></label>
+                        <label>end: <input type="text" data-field="end" value="${this.escapeHtml(meta.timeframe?.end || '')}" placeholder="e.g. 1900 or now"></label>
+                        <label style="flex:1;">desc: <input type="text" data-field="description" value="${this.escapeHtml(meta.timeframe?.description || '')}" placeholder="e.g. victorian london"></label>
+                    </div>
+                    <button type="button" class="rp-btn" data-action="editEntries">edit ${lb.length} entr${lb.length === 1 ? 'y' : 'ies'}</button>`;
+
+                const persist = () => {
+                    const newMeta = {
+                        name: card.querySelector('[data-field="name"]').value,
+                        type: meta.type,
+                        scopeId: card.querySelector('[data-field="scopeId"]')?.value || null,
+                        realityType: card.querySelector('[data-field="realityType"]').value,
+                        timeframe: {
+                            start: card.querySelector('[data-field="start"]').value,
+                            end: card.querySelector('[data-field="end"]').value,
+                            description: card.querySelector('[data-field="description"]').value
+                        }
+                    };
+                    this.rp.storage.saveLorebookMeta(meta.id, newMeta);
+                };
+                card.addEventListener('change', persist);
+                card.querySelector('[data-action="del"]').addEventListener('click', () => {
+                    if (!confirm('delete this lorebook and all its entries?')) return;
+                    this.rp.storage.lorebooks.delete(meta.id);
+                    this.rp.storage.saveLorebooksLocal();
+                    this.rp.storage.deleteLorebookMeta(meta.id);
+                    renderList();
+                });
+                card.querySelector('[data-action="editEntries"]').addEventListener('click', () => {
+                    modal.remove();
+                    this.showLorebookEntryEditor(meta.id, () => this.showLorebookManager());
+                });
+                root.appendChild(card);
+            }
+        };
+        modal.querySelector('#rp-lb-filter').addEventListener('change', renderList);
+        renderList();
+
+        const createLorebook = (type) => {
+            const id = type + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+            this.rp.storage.lorebooks.set(id, []);
+            this.rp.storage.saveLorebooksLocal();
+            this.rp.storage.saveLorebookMeta(id, {
+                name: type + ' lorebook',
+                type,
+                scopeId: null,
+                timeframe: { start: '', end: '', description: '' },
+                realityType: 'fictional'
+            });
+            renderList();
+            showToast?.('lorebook created');
+        };
+        document.getElementById('rp-lb-new-user')?.addEventListener('click', () => createLorebook('user'));
+        document.getElementById('rp-lb-new-character')?.addEventListener('click', () => createLorebook('character'));
+        document.getElementById('rp-lb-new-world')?.addEventListener('click', () => createLorebook('world'));
+    }
+
+    // standalone lorebook entries editor (used for shared lorebooks)
+    showLorebookEntryEditor(lorebookId, onClose) {
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body" style="max-width:760px;">
+                <h3>📖 entries</h3>
+                <div id="rp-lb-entries"></div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-lb-add">+ add entry</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-lb-back">back</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => { modal.remove(); onClose && onClose(); });
+        document.getElementById('rp-lb-back').addEventListener('click', () => { modal.remove(); onClose && onClose(); });
+
+        let entries = (this.rp.storage.getLorebook(lorebookId) || []).map(e => e instanceof LorebookEntry ? e : new LorebookEntry(e));
+        const persist = () => {
+            this.rp.storage.saveLorebook(lorebookId, entries);
+        };
+        const root = modal.querySelector('#rp-lb-entries');
+        const renderEntries = () => {
+            root.innerHTML = '';
+            if (entries.length === 0) {
+                const e = document.createElement('div');
+                e.className = 'rp-empty-desc';
+                e.textContent = 'no entries yet. click + add entry.';
+                root.appendChild(e);
+                return;
+            }
+            entries.forEach((entry, idx) => {
+                const row = document.createElement('div');
+                row.className = 'rp-lore-row';
+                row.innerHTML = `
+                    <div class="rp-lore-row-top">
+                        <input type="text" placeholder="comment / title" value="${this.escapeHtml(entry.comment || '')}" data-field="comment">
+                        <label class="rp-lore-toggle"><input type="checkbox" data-field="enabled" ${entry.enabled !== false ? 'checked' : ''}> enabled</label>
+                        <button type="button" class="rp-action-btn rp-action-delete" data-action="remove">🗑️</button>
+                    </div>
+                    <div class="rp-lore-row-keys">
+                        <input type="text" placeholder="primary keys" value="${this.escapeHtml((entry.keys || []).join(', '))}" data-field="keys">
+                        <input type="text" placeholder="secondary keys" value="${this.escapeHtml((entry.secondaryKeys || []).join(', '))}" data-field="secondaryKeys">
+                    </div>
+                    <textarea rows="3" placeholder="content..." data-field="content">${this.escapeHtml(entry.content || '')}</textarea>`;
+                row.querySelectorAll('[data-field]').forEach(el => {
+                    el.addEventListener('change', () => {
+                        const f = el.dataset.field;
+                        let v = el.type === 'checkbox' ? el.checked : el.value;
+                        if (f === 'keys' || f === 'secondaryKeys') v = v.split(',').map(s => s.trim()).filter(Boolean);
+                        entries[idx][f] = v;
+                        persist();
+                    });
+                });
+                row.querySelector('[data-action="remove"]').addEventListener('click', () => {
+                    entries.splice(idx, 1);
+                    persist();
+                    renderEntries();
+                });
+                root.appendChild(row);
+            });
+        };
+        renderEntries();
+        document.getElementById('rp-lb-add').addEventListener('click', () => {
+            entries.push(new LorebookEntry({ keys: [], content: '', enabled: true }));
+            persist();
+            renderEntries();
         });
     }
 
@@ -2346,25 +6098,37 @@ class RPUIController {
 // =====================================================
 let rpModule = null;
 let rpUI = null;
+let rpExtensions = null;
 
 function initRPModule() {
     if (rpModule) return;
 
     rpModule = new RPModule();
+    rpExtensions = new ExtensionManager(rpModule.storage);
     rpUI = new RPUIController(rpModule);
 
     // expose globally
     window.rpModule = rpModule;
     window.rpUI = rpUI;
+    window.rpExtensions = rpExtensions;
+
+    // auto-register any bundled extensions exposed on window.rpBundledExtensions
+    if (Array.isArray(window.rpBundledExtensions)) {
+        for (const m of window.rpBundledExtensions) {
+            try { rpExtensions.register(m); } catch (e) { console.warn('[rp] bundled extension failed:', e); }
+        }
+    }
 
     console.log('[rp] module initialized');
 }
 
-// auto-init when dom is ready
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initRPModule);
-} else {
-    initRPModule();
+// auto-init when dom is ready (skip in module/test environments without document)
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initRPModule);
+    } else {
+        initRPModule();
+    }
 }
 
 // =====================================================
@@ -2378,8 +6142,20 @@ if (typeof module !== 'undefined' && module.exports) {
         Persona,
         ChatMessage,
         LorebookEntry,
+        LorebookActivationEngine,
         ApiKeyPool,
         RPStorage,
-        NvidiaAPIClient
+        NvidiaAPIClient,
+        Group,
+        QuickReply,
+        QuickReplySet,
+        ExpressionDetector,
+        ExtensionManager,
+        MacroEngine,
+        MemoryEntry,
+        MemorySimilarity,
+        SemanticCache,
+        RP_STORAGE_KEYS,
+        RP_MIGRATION_VERSION
     };
 }

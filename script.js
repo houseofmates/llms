@@ -693,7 +693,82 @@ function persistTabState() {
     }
 }
 
-function attachTabLongPress(element, _tabId) {
+// dismiss any active tab-close popup
+function dismissTabClosePopup() {
+    document.querySelectorAll('.tab-close-popup, .tab-close-popup-backdrop').forEach((el) => el.remove());
+}
+
+// shows an action-sheet style popup near the tab with a "close" option.
+// designed to be finger-friendly (min 44px touch targets) on mobile.
+function showTabClosePopup(anchorEl, tabId) {
+    dismissTabClosePopup();
+
+    const rect = anchorEl.getBoundingClientRect();
+    const friendlyName = getFriendlyTabName(tabId);
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'tab-close-popup-backdrop';
+    backdrop.addEventListener('click', dismissTabClosePopup);
+    backdrop.addEventListener('touchstart', dismissTabClosePopup, { passive: true });
+    document.body.appendChild(backdrop);
+
+    const popup = document.createElement('div');
+    popup.className = 'tab-close-popup';
+    popup.setAttribute('role', 'menu');
+    popup.setAttribute('aria-label', `tab actions for ${friendlyName}`);
+
+    // position centered horizontally over the tab, just below it; clamp to viewport.
+    const x = Math.max(80, Math.min(window.innerWidth - 80, rect.left + rect.width / 2));
+    const y = Math.min(rect.bottom + 8, window.innerHeight - 120);
+    popup.style.left = x + 'px';
+    popup.style.top = y + 'px';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'tab-close-popup-danger';
+    closeBtn.setAttribute('role', 'menuitem');
+    closeBtn.setAttribute('aria-label', `close ${friendlyName} tab`);
+    closeBtn.innerHTML = '✕ close';
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dismissTabClosePopup();
+        if (typeof closeTab === 'function') closeTab(tabId);
+    });
+    closeBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dismissTabClosePopup();
+        if (typeof closeTab === 'function') closeTab(tabId);
+    }, { passive: false });
+    popup.appendChild(closeBtn);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.setAttribute('role', 'menuitem');
+    cancelBtn.setAttribute('aria-label', 'cancel');
+    cancelBtn.textContent = 'cancel';
+    cancelBtn.addEventListener('click', dismissTabClosePopup);
+    cancelBtn.addEventListener('touchend', (e) => { e.preventDefault(); dismissTabClosePopup(); }, { passive: false });
+    popup.appendChild(cancelBtn);
+
+    document.body.appendChild(popup);
+}
+
+// produces a friendly tab name from the model registry, with sensible fallbacks
+// for our two custom chat surfaces (local gemma + rp).
+function getFriendlyTabName(tabId) {
+    try {
+        const tab = (openTabs || []).find((t) => t.id === tabId);
+        if (!tab) return 'tab';
+        const model = (models || []).find((m) => m.id === tab.modelId || m.id === tab.id);
+        if (model && model.name) return model.name;
+        if (tab.id === 'llama-offline') return 'gemma 4b';
+        if (tab.id === 'rp' || tab.id === 'roleplay') return 'kimi k2.6 rp';
+        return tab.label || 'tab';
+    } catch (e) {
+        return 'tab';
+    }
+}
+
+function attachTabLongPress(element, tabId) {
     let pressTimer = null;
     let longPressTriggered = false;
 
@@ -716,7 +791,9 @@ function attachTabLongPress(element, _tabId) {
             if (navigator.vibrate) {
                 navigator.vibrate(40);
             }
-        }, 600);
+            // show the proper action-sheet popup
+            showTabClosePopup(element, tabId);
+        }, 500); // 500ms per spec
     }, { passive: true });
 
     element.addEventListener('touchend', (e) => {
@@ -737,6 +814,25 @@ function attachTabLongPress(element, _tabId) {
             }
         }, { passive: true });
     });
+
+    // also support desktop right-click to show the popup (in addition to the
+    // existing contextmenu handler that closes immediately - long-press on
+    // mobile and right-click on desktop should behave the same).
+    element.addEventListener('contextmenu', (e) => {
+        // existing handler closes; we let it stay, but ALSO surface the popup
+        // for users who want the explicit "close" affordance. it's harmless
+        // because dismissTabClosePopup is idempotent.
+        e.preventDefault();
+        showTabClosePopup(element, tabId);
+    });
+}
+
+// expose for tests
+if (typeof window !== 'undefined') {
+    window.__tabUtils = window.__tabUtils || {};
+    window.__tabUtils.getFriendlyTabName = getFriendlyTabName;
+    window.__tabUtils.showTabClosePopup = showTabClosePopup;
+    window.__tabUtils.dismissTabClosePopup = dismissTabClosePopup;
 }
 
 function sendAndroidTabState() {
@@ -775,7 +871,13 @@ function renderTabs() {
 
     openTabs.forEach((tab) => {
         const model = models.find(m => m.id === tab.modelId || m.id === tab.id);
-        const nameText = model ? model.name : tab.label;
+        // friendly fallbacks for the two custom chat surfaces
+        let nameText = model ? model.name : tab.label;
+        if (!nameText) {
+            if (tab.id === 'llama-offline') nameText = 'gemma 4b';
+            else if (tab.id === 'rp' || tab.id === 'roleplay') nameText = 'kimi k2.6 rp';
+            else nameText = 'tab';
+        }
 
         const tabEl = document.createElement('div');
         tabEl.className = `tab-pill ${tab.id === activeTabId ? 'active-tab' : ''}`;
@@ -823,11 +925,8 @@ function renderTabs() {
             }
         });
 
-        tabEl.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            closeTab(tab.id);
-        });
-
+        // contextmenu is handled inside attachTabLongPress so right-click shows
+        // the same action-sheet popup as a mobile long-press
         attachTabLongPress(tabEl, tab.id);
         tabStrip.appendChild(tabEl);
     });
@@ -3423,9 +3522,45 @@ async function processApiMessage(text) {
         }
     }
 
+    // optional: pre-fetch brave search results for the local gemma model, so the
+    // model can answer questions that need up-to-date information. triggered
+    // either manually (via the 🔍 button setting forceBraveSearch) or via the
+    // freshness heuristic when auto-search is enabled.
+    let braveContextBlock = '';
+    if (currentApiMode === 'llama-offline' && typeof window !== 'undefined' && window.BraveSearch) {
+        const force = window.__braveForceNextSearch === true;
+        const auto = window.BraveSearch.isAutoSearchEnabled() && window.BraveSearch.shouldAutoSearch(processedText);
+        if (force || auto) {
+            window.__braveForceNextSearch = false; // consume one-shot flag
+            const key = window.BraveSearch.getKey();
+            if (!key) {
+                showToast('add your brave api key in settings to enable search');
+            } else {
+                try {
+                    showToast('searching brave...');
+                    const results = await window.BraveSearch.search(processedText, { apiKey: key, count: 5 });
+                    if (results.length > 0) {
+                        braveContextBlock = window.BraveSearch.formatResultsForPrompt(processedText, results);
+                        window.BraveSearch.rememberQuery(processedText);
+                    }
+                } catch (e) {
+                    console.warn('[brave] search failed:', e.message);
+                    showToast('brave search failed: ' + e.message.substring(0, 80));
+                }
+            }
+        }
+    }
+
     // if first message, silently prepend system prompt to history if it wasn't injected manually
     if (chatHistory.length === 0 && !processedText.includes(getSystemPrompt())) {
         chatHistory.push({ role: 'system', content: getSystemPrompt() });
+    }
+
+    // if we have brave results, push them as a one-shot system message that
+    // sits just before the user's question. this keeps the model's chat
+    // history clean while still giving it fresh context for THIS turn.
+    if (braveContextBlock) {
+        chatHistory.push({ role: 'system', content: braveContextBlock });
     }
 
     appendMessage('user', processedText);
@@ -4190,6 +4325,10 @@ async function populateApiModal() {
     if (mistralKeyInput) {
         mistralKeyInput.value = keys.mistral || '';
     }
+    const braveInput = document.getElementById('brave-key-input');
+    if (braveInput) {
+        braveInput.value = keys.brave || '';
+    }
     if (nocobaseUrlInput) {
         nocobaseUrlInput.value = ncfg.url || '';
     }
@@ -4469,13 +4608,19 @@ function resetApiKeyModal() {
 
 // api key modal event listeners
 saveApiKeysBtn?.addEventListener('click', async () => {
-    const keys = {
-        openrouter: openrouterKeyInput?.value?.trim() || '',
-        huggingface: huggingfaceKeyInput?.value?.trim() || '',
-        gemini: geminiKeyInput?.value?.trim() || '',
-        deepseek: deepseekKeyInput?.value?.trim() || '',
-        mistral: mistralKeyInput?.value?.trim() || ''
-    };
+    // preserve any keys that already exist in storage (modal only exposes a subset)
+    const existing = (function () {
+        try { return JSON.parse(localStorage.getItem('llms_api_keys') || '{}'); } catch (e) { return {}; }
+    })();
+    const braveInput = document.getElementById('brave-key-input');
+    const keys = Object.assign({}, existing, {
+        openrouter: openrouterKeyInput?.value?.trim() || existing.openrouter || '',
+        huggingface: huggingfaceKeyInput?.value?.trim() || existing.huggingface || '',
+        gemini: geminiKeyInput?.value?.trim() || existing.gemini || '',
+        deepseek: deepseekKeyInput?.value?.trim() || existing.deepseek || '',
+        mistral: mistralKeyInput?.value?.trim() || existing.mistral || '',
+        brave: braveInput?.value?.trim() || existing.brave || ''
+    });
     const nbConfig = {
         url: nocobaseUrlInput?.value?.trim() || '',
         apiKey: nocobaseKeyInput?.value?.trim() || ''
@@ -4600,6 +4745,44 @@ function updateAttachmentUI() {
     }
     const show = modelSupportsImages();
     attachBtn.style.display = show ? 'inline-flex' : 'none';
+    // sibling: brave search controls (only meaningful for local gemma)
+    updateBraveSearchUI();
+}
+
+// shows the 🔍 search button and "auto" toggle when the active model is the
+// local gemma. these controls integrate with brave-search.js to inject
+// search results into the next outgoing prompt.
+function updateBraveSearchUI() {
+    const btn = document.getElementById('brave-search-btn');
+    const wrap = document.getElementById('brave-auto-toggle-wrap');
+    const toggle = document.getElementById('brave-auto-toggle');
+    if (!btn || !wrap || !toggle) return;
+    const visible = currentApiMode === 'llama-offline';
+    btn.classList.toggle('hidden', !visible);
+    wrap.classList.toggle('hidden', !visible);
+    if (!visible) return;
+    if (typeof window.BraveSearch !== 'undefined') {
+        toggle.checked = window.BraveSearch.isAutoSearchEnabled();
+    }
+    // (re)bind once
+    if (!btn.__braveBound) {
+        btn.addEventListener('click', () => {
+            if (!window.BraveSearch?.getKey()) {
+                showToast('add your brave api key in settings first');
+                return;
+            }
+            window.__braveForceNextSearch = true;
+            btn.classList.add('brave-search-armed');
+            showToast('brave search armed for next message');
+        });
+        btn.__braveBound = true;
+    }
+    if (!toggle.__braveBound) {
+        toggle.addEventListener('change', (e) => {
+            if (window.BraveSearch) window.BraveSearch.setAutoSearchEnabled(e.target.checked);
+        });
+        toggle.__braveBound = true;
+    }
 }
 
 // chat management functions
@@ -4784,6 +4967,10 @@ async function loadApiKeysFromNocoBase() {
             }
             if (geminiKeyInput) {
                 geminiKeyInput.value = keys.gemini || '';
+            }
+            const braveInput2 = document.getElementById('brave-key-input');
+            if (braveInput2) {
+                braveInput2.value = keys.brave || '';
             }
             showToast('api keys loaded from nocobase');
             return true;

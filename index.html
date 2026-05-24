@@ -102,6 +102,17 @@
         *:active {
             scrollbar-width: thin;
         }
+
+        /* brave search button "armed" state */
+        .brave-search-armed {
+            background: rgba(245, 175, 18, 0.25) !important;
+            color: #f5af12 !important;
+            animation: bravePulse 1.2s ease-in-out infinite;
+        }
+        @keyframes bravePulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(245, 175, 18, 0.35); }
+            50%      { box-shadow: 0 0 0 8px rgba(245, 175, 18, 0); }
+        }
     </style>
 
 </head>
@@ -211,11 +222,14 @@
                         <!-- messages rendered here -->
                     </div>
                     <div class="rp-chat-input-container">
+                        <div id="rp-attachment-tray" class="rp-attachment-tray hidden"></div>
                         <div class="rp-chat-input-wrapper">
                             <textarea id="rp-chat-input" placeholder="type your message..." rows="1"></textarea>
                             <div class="rp-chat-input-actions">
                                 <button id="rp-attach-btn" title="attach image" aria-label="Attach image">📎</button>
-                                <input type="file" id="rp-attach-input" accept="image/*" class="hidden">
+                                <input type="file" id="rp-attach-input" accept="image/*" multiple class="hidden">
+                                <button id="rp-attach-video-btn" title="attach video (experimental)" aria-label="Attach video">🎬</button>
+                                <input type="file" id="rp-attach-video-input" accept="video/*" class="hidden">
                                 <button id="rp-send-btn" title="send" aria-label="Send">➤</button>
                             </div>
                         </div>
@@ -294,7 +308,13 @@
                                     <div class="flex-1 flex flex-col gap-2 rounded-2xl bg-[#111] p-3 border border-secondary/30 focus-within:border-secondary transition-colors shadow-lg">
                                         <textarea id="api-chat-input" class="w-full bg-transparent outline-none resize-none text-white max-h-48 min-h-[60px]" placeholder="type your message..."></textarea>
                                         <div class="flex justify-between items-center px-1">
-                                            <button id="inject-prompt-api-btn" class="text-xs text-primary bg-primary/10 px-3 py-1 rounded-full hover:bg-primary/20 transition-colors">+ sys prompt</button>
+                                            <div class="flex items-center gap-2 flex-wrap">
+                                                <button id="inject-prompt-api-btn" class="text-xs text-primary bg-primary/10 px-3 py-1 rounded-full hover:bg-primary/20 transition-colors">+ sys prompt</button>
+                                                <button id="brave-search-btn" class="text-xs text-secondary bg-secondary/10 px-3 py-1 rounded-full hover:bg-secondary/20 transition-colors hidden" title="search with brave before sending">🔍 search</button>
+                                                <label id="brave-auto-toggle-wrap" class="text-xs text-gray-400 hidden flex items-center gap-1">
+                                                    <input type="checkbox" id="brave-auto-toggle"> auto
+                                                </label>
+                                            </div>
                                             <div class="flex items-center gap-1">
                                                 <button id="attach-btn" class="bg-white/10 text-secondary p-2 rounded-full hover:bg-white/20 transition-transform hidden" title="attach image">📎</button>
                                                 <input type="file" id="attach-input" accept="image/*" class="hidden">
@@ -378,6 +398,12 @@
                         placeholder="ai...">
                 </div>
                 <div class="flex flex-col gap-1">
+                    <label class="text-xs text-secondary font-bold">brave search api key</label>
+                    <input type="password" id="brave-key-input"
+                        class="w-full bg-background text-white p-3 rounded-xl border border-gray-800 outline-none focus:border-secondary transition-colors text-sm"
+                        placeholder="BSA...">
+                </div>
+                <div class="flex flex-col gap-1">
                     <label class="text-xs text-secondary font-bold">nocobase url</label>
                     <input type="text" id="nocobase-url-input"
                         class="w-full bg-background text-white p-3 rounded-xl border border-gray-800 outline-none focus:border-secondary transition-colors text-sm"
@@ -399,6 +425,13 @@
     </div>
 
     <script src="llama-offline.js"></script>
+    <script src="brave-search.js"></script>
+    <!-- bundled api keys from .env (build-time, present in personal builds only).
+         this file is generated by scripts/bundle-env-keys.js into dist/ and is
+         gitignored - public builds get a harmless empty stub. -->
+    <script src="rp-keys.bundled.js"></script>
+    <!-- rp bundled extensions must register BEFORE rp-module initializes -->
+    <script src="rp-extensions.js"></script>
     <script src="rp-module.js"></script>
     <script src="script.js"></script>
 </body>
