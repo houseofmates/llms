@@ -12,8 +12,16 @@ const RP_STORAGE_KEYS = {
     LOREBOOKS: 'llms_rp_lorebooks',
     ACTIVE_PERSONA: 'llms_rp_active_persona',
     API_KEYS: 'llms_rp_api_keys',
-    KEY_POOL_STATE: 'llms_rp_key_pool_state'
+    KEY_POOL_STATE: 'llms_rp_key_pool_state',
+    GROUPS: 'llms_rp_groups',
+    GROUP_CHATS: 'llms_rp_group_chats',
+    QUICK_REPLY_SETS: 'llms_rp_quick_reply_sets',
+    EXTENSIONS: 'llms_rp_extensions',
+    MIGRATION_VERSION: 'llms_rp_migration_version'
 };
+
+// current data migration version. bump when models change.
+const RP_MIGRATION_VERSION = 2;
 
 // =====================================================
 // nvidia nim api configuration
@@ -51,6 +59,15 @@ class CharacterCard {
         this.createdAt = data.createdAt || new Date().toISOString();
         this.updatedAt = data.updatedAt || new Date().toISOString();
         this.extensions = data.extensions || {};
+
+        // expressions: array of { name, avatarUrl, triggers }
+        // each expression represents a mood/emotion the character can show
+        this.expressions = Array.isArray(data.expressions) ? data.expressions : [];
+        this.defaultExpression = data.defaultExpression || 'neutral';
+
+        // embedded lorebook entries (sillytavern character_book)
+        // entries may also live in a shared lorebook keyed by lorebookId
+        this.embeddedLorebook = Array.isArray(data.embeddedLorebook) ? data.embeddedLorebook : [];
     }
 
     generateId() {
@@ -138,41 +155,290 @@ class ChatMessage {
         this.personaId = data.personaId || null;
         this.branchId = data.branchId || 'main';
         this.parentMessageId = data.parentMessageId || null;
-        this.variants = data.variants || [];
+        // variants: list of { content, generatedAt, model, temperature }
+        this.variants = Array.isArray(data.variants) ? data.variants : [];
+        // index of currently displayed variant within variants. -1 means use root content.
+        this.activeVariantIndex = typeof data.activeVariantIndex === 'number' ? data.activeVariantIndex : -1;
         this.isEdited = data.isEdited || false;
+        // expression name shown for this message (assistant messages only)
+        this.expression = data.expression || null;
+        // optional summary block (marks a message that replaces a swath of history)
+        this.isSummary = !!data.isSummary;
+        // for group chats: which character actually spoke this assistant turn
+        this.speakerCharacterId = data.speakerCharacterId || null;
     }
 
     generateId() {
         return 'msg_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
     }
+
+    // returns the active text content, accounting for active variant
+    getActiveContent() {
+        if (this.activeVariantIndex >= 0 && this.variants[this.activeVariantIndex]) {
+            return this.variants[this.activeVariantIndex].content;
+        }
+        return this.content;
+    }
+
+    // total number of variants including the original
+    totalVariants() {
+        return 1 + this.variants.length;
+    }
+
+    // active variant number (1-indexed) for ui display
+    activeVariantNumber() {
+        return this.activeVariantIndex < 0 ? 1 : this.activeVariantIndex + 2;
+    }
 }
 
 // =====================================================
-// lorebook entry class
+// lorebook entry class (sillytavern-compatible)
 // =====================================================
 class LorebookEntry {
     constructor(data = {}) {
         this.id = data.id || this.generateId();
-        this.keys = data.keys || [];
+        this.keys = Array.isArray(data.keys) ? data.keys : [];
+        // secondary keys must ALSO match when present (logic: secondary AND any primary)
+        this.secondaryKeys = Array.isArray(data.secondaryKeys || data.keysecondary) ? (data.secondaryKeys || data.keysecondary) : [];
         this.content = data.content || '';
         this.enabled = data.enabled !== false;
-        this.insertionOrder = data.insertionOrder || 0;
-        this.caseSensitive = data.caseSensitive || false;
+        this.insertionOrder = data.insertionOrder ?? data.insertion_order ?? 0;
+        this.caseSensitive = !!(data.caseSensitive || data.case_sensitive);
+        // priority: higher means included first when budget is limited
         this.priority = data.priority || 0;
         this.comment = data.comment || '';
+        // constant entries are always injected, ignoring keys
+        this.constant = !!data.constant;
+        // selective: only match when both primary AND secondary keys match
+        // (default true if secondaryKeys exist to match sillytavern semantics)
+        this.selective = data.selective !== undefined
+            ? !!data.selective
+            : (this.secondaryKeys.length > 0);
+        // position: where to inject relative to chat
+        // 'before' = prepended to system prompt, 'after' = appended after system,
+        // 'system' = standalone system message, 'an' = author's note (after chat)
+        this.position = data.position || 'before';
+        // ordering: lower numbers inject earlier (deterministic), priority breaks ties
+        this.order = data.order ?? data.insertionOrder ?? 0;
+        // depth: how many recent messages to scan for matches (0 = unlimited)
+        this.scanDepth = data.scanDepth || 0;
+        // probability percent (0-100) that this entry triggers when matched
+        this.probability = typeof data.probability === 'number' ? data.probability : 100;
     }
 
     generateId() {
         return 'lore_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
     }
 
+    // returns true if any key (or regex /pattern/flags) matches the given text
+    matchesAny(keyList, text) {
+        const searchText = this.caseSensitive ? text : text.toLowerCase();
+        for (const rawKey of keyList) {
+            if (!rawKey) continue;
+            const key = String(rawKey).trim();
+            // regex syntax /pattern/flags
+            const regexMatch = key.match(/^\/(.+)\/([gimsuy]*)$/);
+            if (regexMatch) {
+                try {
+                    const re = new RegExp(regexMatch[1], regexMatch[2]);
+                    if (re.test(searchText)) return true;
+                } catch (e) {
+                    // fall through to substring match
+                }
+                continue;
+            }
+            const searchKey = this.caseSensitive ? key : key.toLowerCase();
+            if (searchText.includes(searchKey)) return true;
+        }
+        return false;
+    }
+
+    // returns true if this entry should be activated for the given context text
     matches(text) {
         if (!this.enabled) return false;
-        const searchText = this.caseSensitive ? text : text.toLowerCase();
-        return this.keys.some(key => {
-            const searchKey = this.caseSensitive ? key : key.toLowerCase();
-            return searchText.includes(searchKey);
+        if (this.constant) return true;
+        const hasPrimary = this.matchesAny(this.keys, text);
+        if (!hasPrimary) return false;
+        if (this.selective && this.secondaryKeys.length > 0) {
+            return this.matchesAny(this.secondaryKeys, text);
+        }
+        return true;
+    }
+}
+
+// =====================================================
+// lorebook activation engine
+// =====================================================
+class LorebookActivationEngine {
+    // recent messages: array of objects with at least { role, content }
+    // entries: array of LorebookEntry instances
+    // returns: { systemBlocks: { before, after, system, an }, activated: [entries] }
+    static activate(entries, recentMessages, opts = {}) {
+        if (!Array.isArray(entries) || entries.length === 0) {
+            return { before: '', after: '', system: '', an: '', activated: [] };
+        }
+
+        const tokenBudget = opts.tokenBudget || 1500; // approx, characters/4
+        const activated = [];
+
+        for (const entry of entries) {
+            if (!entry || !entry.enabled) continue;
+            // determine scan window
+            const depth = entry.scanDepth && entry.scanDepth > 0
+                ? entry.scanDepth
+                : recentMessages.length;
+            const scanText = recentMessages
+                .slice(-depth)
+                .map(m => (typeof m.content === 'string' ? m.content : ''))
+                .join(' ');
+
+            const isMatch = entry.constant || entry.matches(scanText);
+            if (!isMatch) continue;
+
+            // probability gate
+            if (entry.probability < 100) {
+                if (Math.random() * 100 > entry.probability) continue;
+            }
+
+            activated.push(entry);
+        }
+
+        // sort by priority desc, then order asc
+        activated.sort((a, b) => {
+            if (b.priority !== a.priority) return b.priority - a.priority;
+            return (a.order || 0) - (b.order || 0);
         });
+
+        // enforce a soft character budget
+        const groups = { before: [], after: [], system: [], an: [] };
+        let used = 0;
+        const cap = tokenBudget * 4;
+        for (const entry of activated) {
+            const cost = (entry.content || '').length;
+            if (used + cost > cap) continue;
+            used += cost;
+            const pos = ['before', 'after', 'system', 'an'].includes(entry.position) ? entry.position : 'before';
+            groups[pos].push(entry.content);
+        }
+
+        return {
+            before: groups.before.join('\n\n'),
+            after: groups.after.join('\n\n'),
+            system: groups.system.join('\n\n'),
+            an: groups.an.join('\n\n'),
+            activated
+        };
+    }
+}
+
+// =====================================================
+// group (multi-character) class
+// =====================================================
+class Group {
+    constructor(data = {}) {
+        this.id = data.id || this.generateId();
+        this.name = data.name || 'untitled group';
+        this.description = data.description || '';
+        this.avatarUrl = data.avatarUrl || '';
+        this.characterIds = Array.isArray(data.characterIds) ? data.characterIds : [];
+        this.settings = Object.assign({
+            turnOrder: 'sequential', // 'sequential' | 'roundRobin' | 'random'
+            autoAdvance: true,
+            responseDelayMs: 0,
+            systemPromptTemplate: ''
+        }, data.settings || {});
+        // per-character overrides: { [characterId]: { temperature, systemPromptOverride } }
+        this.characterOverrides = data.characterOverrides || {};
+        this.createdAt = data.createdAt || new Date().toISOString();
+        this.updatedAt = data.updatedAt || new Date().toISOString();
+    }
+
+    generateId() {
+        return 'group_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+    }
+}
+
+// =====================================================
+// quick reply / quick reply set
+// =====================================================
+class QuickReply {
+    constructor(data = {}) {
+        this.id = data.id || ('qr_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6));
+        this.label = data.label || '';
+        this.text = data.text || '';
+        this.sendImmediately = !!data.sendImmediately;
+    }
+}
+
+class QuickReplySet {
+    constructor(data = {}) {
+        this.id = data.id || ('qrset_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6));
+        this.name = data.name || 'untitled set';
+        // scope: 'global' | 'character' | 'group'
+        this.scope = data.scope || 'global';
+        this.scopeId = data.scopeId || null;
+        this.replies = (data.replies || []).map(r => new QuickReply(r));
+        this.enabled = data.enabled !== false;
+    }
+}
+
+// =====================================================
+// expression detector
+// detects the closest matching expression for a piece of text
+// =====================================================
+class ExpressionDetector {
+    // default keyword maps for common moods
+    static DEFAULT_TRIGGERS = {
+        happy: ['smile', 'smiled', 'happy', 'laugh', 'giggl', 'grin', 'cheer', 'delight', 'joy'],
+        sad: ['sad', 'cry', 'cried', 'tear', 'weep', 'sob', 'sorrow', 'lonely', 'gloom'],
+        angry: ['angry', 'furious', 'rage', 'mad', 'growl', 'snarl', 'shout', 'yell', 'glare'],
+        surprised: ['surprised', 'shock', 'gasp', 'startle', 'astonish', 'amazed', 'wow'],
+        scared: ['afraid', 'scared', 'fear', 'tremble', 'shiver', 'panic', 'terrif'],
+        thinking: ['think', 'wonder', 'ponder', 'consider', 'hmm', 'puzzled'],
+        embarrassed: ['blush', 'blushed', 'embarrass', 'flustered', 'shy', 'awkward'],
+        neutral: []
+    };
+
+    static detect(character, text) {
+        if (!character || !Array.isArray(character.expressions) || character.expressions.length === 0) {
+            return null;
+        }
+        if (!text) return character.defaultExpression || null;
+        const lower = text.toLowerCase();
+        let best = null;
+        let bestScore = 0;
+
+        for (const exp of character.expressions) {
+            const triggers = (exp.triggers && exp.triggers.length > 0)
+                ? exp.triggers
+                : (ExpressionDetector.DEFAULT_TRIGGERS[exp.name] || []);
+            let score = 0;
+            for (const t of triggers) {
+                if (!t) continue;
+                const key = String(t).toLowerCase();
+                if (lower.includes(key)) score += 1;
+            }
+            if (score > bestScore) {
+                best = exp.name;
+                bestScore = score;
+            }
+        }
+
+        return best || character.defaultExpression || (character.expressions[0] && character.expressions[0].name) || null;
+    }
+
+    // resolves an expression name to a usable avatar url, falling back to default/main
+    static getAvatarUrl(character, expressionName) {
+        if (!character) return '';
+        if (expressionName && Array.isArray(character.expressions)) {
+            const found = character.expressions.find(e => e.name === expressionName);
+            if (found && found.avatarUrl) return found.avatarUrl;
+        }
+        if (character.defaultExpression) {
+            const def = (character.expressions || []).find(e => e.name === character.defaultExpression);
+            if (def && def.avatarUrl) return def.avatarUrl;
+        }
+        return character.avatarUrl || '';
     }
 }
 
@@ -524,6 +790,10 @@ class RPStorage {
         this.chats = new Map();
         this.lorebooks = new Map();
         this.settings = {};
+        this.groups = new Map();
+        this.groupChats = new Map();
+        this.quickReplySets = new Map();
+        this.extensionsState = {}; // { extensionId: { enabled, settings } }
         this.nocobase = new RPNocoBaseSync();
         this.isLoaded = false;
         this.loadAll();
@@ -536,6 +806,17 @@ class RPStorage {
         this.loadChatsLocal();
         this.loadLorebooksLocal();
         this.loadSettingsLocal();
+        this.loadGroupsLocal();
+        this.loadGroupChatsLocal();
+        this.loadQuickReplySetsLocal();
+        this.loadExtensionsLocal();
+
+        // run any pending data migrations
+        try {
+            this.runMigrations();
+        } catch (e) {
+            console.warn('[rp] migration failed:', e);
+        }
 
         // then try to sync from nocobase (if configured)
         if (this.nocobase.isConfigured()) {
@@ -543,6 +824,63 @@ class RPStorage {
         }
 
         this.isLoaded = true;
+    }
+
+    // ---- migrations ----
+    // ensures any older data on disk gets the new fields with safe defaults.
+    runMigrations() {
+        let currentVersion = 0;
+        try {
+            currentVersion = parseInt(localStorage.getItem(RP_STORAGE_KEYS.MIGRATION_VERSION) || '0', 10) || 0;
+        } catch (e) {
+            currentVersion = 0;
+        }
+        if (currentVersion >= RP_MIGRATION_VERSION) return;
+
+        // back up any existing rp data before migrating
+        try {
+            const backupKey = 'llms_rp_backup_v' + currentVersion + '_' + Date.now();
+            const backup = {};
+            for (const k of Object.values(RP_STORAGE_KEYS)) {
+                const v = localStorage.getItem(k);
+                if (v !== null) backup[k] = v;
+            }
+            // only write a backup if we actually have data
+            if (Object.keys(backup).length > 0) {
+                try {
+                    localStorage.setItem(backupKey, JSON.stringify(backup));
+                } catch (e) {
+                    // backup may exceed quota - safe to skip
+                }
+            }
+        } catch (e) {
+            // non-fatal
+        }
+
+        // v1: ensure characters have expressions/defaultExpression
+        // v2: ensure messages have variants array + activeVariantIndex; ensure groups/quickReplySets exist
+        for (const [id, char] of this.characters) {
+            if (!Array.isArray(char.expressions)) char.expressions = [];
+            if (!char.defaultExpression) char.defaultExpression = 'neutral';
+            if (!Array.isArray(char.embeddedLorebook)) char.embeddedLorebook = [];
+        }
+        this.saveCharactersLocal();
+
+        for (const [cid, chat] of this.chats) {
+            if (!chat || !Array.isArray(chat.messages)) continue;
+            for (const msg of chat.messages) {
+                if (!Array.isArray(msg.variants)) msg.variants = [];
+                if (typeof msg.activeVariantIndex !== 'number') msg.activeVariantIndex = -1;
+            }
+        }
+        this.saveChatsLocal();
+
+        try {
+            localStorage.setItem(RP_STORAGE_KEYS.MIGRATION_VERSION, String(RP_MIGRATION_VERSION));
+        } catch (e) {
+            // non-fatal
+        }
+        console.log('[rp] migrations applied through version', RP_MIGRATION_VERSION);
     }
 
     async syncFromNocoBase() {
@@ -707,6 +1045,79 @@ class RPStorage {
         }
     }
 
+    loadGroupsLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.GROUPS) || '[]');
+            this.groups = new Map(data.map(g => [g.id, new Group(g)]));
+        } catch (e) {
+            console.warn('[rp] failed to load groups locally:', e);
+            this.groups = new Map();
+        }
+    }
+
+    saveGroupsLocal() {
+        try {
+            const data = Array.from(this.groups.values());
+            localStorage.setItem(RP_STORAGE_KEYS.GROUPS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save groups locally:', e);
+        }
+    }
+
+    loadGroupChatsLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.GROUP_CHATS) || '{}');
+            this.groupChats = new Map(Object.entries(data));
+        } catch (e) {
+            console.warn('[rp] failed to load group chats locally:', e);
+            this.groupChats = new Map();
+        }
+    }
+
+    saveGroupChatsLocal() {
+        try {
+            const data = Object.fromEntries(this.groupChats);
+            localStorage.setItem(RP_STORAGE_KEYS.GROUP_CHATS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save group chats locally:', e);
+        }
+    }
+
+    loadQuickReplySetsLocal() {
+        try {
+            const data = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.QUICK_REPLY_SETS) || '[]');
+            this.quickReplySets = new Map(data.map(s => [s.id, new QuickReplySet(s)]));
+        } catch (e) {
+            console.warn('[rp] failed to load quick reply sets locally:', e);
+            this.quickReplySets = new Map();
+        }
+    }
+
+    saveQuickReplySetsLocal() {
+        try {
+            const data = Array.from(this.quickReplySets.values());
+            localStorage.setItem(RP_STORAGE_KEYS.QUICK_REPLY_SETS, JSON.stringify(data));
+        } catch (e) {
+            console.error('[rp] failed to save quick reply sets locally:', e);
+        }
+    }
+
+    loadExtensionsLocal() {
+        try {
+            this.extensionsState = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.EXTENSIONS) || '{}');
+        } catch (e) {
+            this.extensionsState = {};
+        }
+    }
+
+    saveExtensionsLocal() {
+        try {
+            localStorage.setItem(RP_STORAGE_KEYS.EXTENSIONS, JSON.stringify(this.extensionsState));
+        } catch (e) {
+            console.error('[rp] failed to save extensions locally:', e);
+        }
+    }
+
     // ---- public api (saves to both local and cloud) ----
 
     getCharacter(id) {
@@ -848,6 +1259,91 @@ class RPStorage {
         this.settings[key] = value;
         this.saveSettingsLocal();
         this.nocobase.saveRecord('settings', 'rp_settings', this.settings);
+    }
+
+    // ---- groups ----
+    getAllGroups() {
+        return Array.from(this.groups.values());
+    }
+
+    getGroup(id) {
+        return this.groups.get(id);
+    }
+
+    saveGroup(group) {
+        group.updatedAt = new Date().toISOString();
+        this.groups.set(group.id, group);
+        this.saveGroupsLocal();
+        this.nocobase.saveRecord('group', group.id, group);
+        return group;
+    }
+
+    deleteGroup(id) {
+        this.groups.delete(id);
+        this.saveGroupsLocal();
+        this.nocobase.deleteRecord(id, 'group');
+        // also delete group's chat history
+        this.groupChats.delete(id);
+        this.saveGroupChatsLocal();
+        this.nocobase.deleteRecord(id, 'groupChat');
+    }
+
+    getGroupChat(groupId) {
+        return this.groupChats.get(groupId) || { messages: [] };
+    }
+
+    saveGroupChat(groupId, chatData) {
+        this.groupChats.set(groupId, chatData);
+        this.saveGroupChatsLocal();
+        this.nocobase.saveRecord('groupChat', groupId, { id: groupId, ...chatData });
+    }
+
+    clearGroupChat(groupId) {
+        this.groupChats.set(groupId, { messages: [] });
+        this.saveGroupChatsLocal();
+        this.nocobase.saveRecord('groupChat', groupId, { id: groupId, messages: [] });
+    }
+
+    // ---- quick reply sets ----
+    getAllQuickReplySets() {
+        return Array.from(this.quickReplySets.values());
+    }
+
+    getQuickReplySetsForScope(scope, scopeId = null) {
+        // returns all global sets plus any matching the scope+id
+        return this.getAllQuickReplySets().filter(s => {
+            if (!s.enabled) return false;
+            if (s.scope === 'global') return true;
+            return s.scope === scope && s.scopeId === scopeId;
+        });
+    }
+
+    saveQuickReplySet(set) {
+        if (!(set instanceof QuickReplySet)) set = new QuickReplySet(set);
+        this.quickReplySets.set(set.id, set);
+        this.saveQuickReplySetsLocal();
+        this.nocobase.saveRecord('quickReplySet', set.id, set);
+        return set;
+    }
+
+    deleteQuickReplySet(id) {
+        this.quickReplySets.delete(id);
+        this.saveQuickReplySetsLocal();
+        this.nocobase.deleteRecord(id, 'quickReplySet');
+    }
+
+    // ---- extensions ----
+    getExtensionState(id) {
+        return this.extensionsState[id] || { enabled: false, settings: {} };
+    }
+
+    setExtensionState(id, state) {
+        this.extensionsState[id] = Object.assign({}, this.extensionsState[id] || {}, state);
+        this.saveExtensionsLocal();
+    }
+
+    getAllExtensionStates() {
+        return Object.assign({}, this.extensionsState);
     }
 
     // force sync to cloud
@@ -1115,14 +1611,36 @@ class RPModule {
         return character;
     }
 
-    getContextMessages() {
-        if (!this.currentCharacter) return [];
+    // builds the context messages for a given character + history.
+    // when speakerCharacter is provided (group chat) it is used in place of currentCharacter.
+    // when speakerOverride is provided (group chat) it may carry per-character overrides.
+    getContextMessages(opts = {}) {
+        const character = opts.character || this.currentCharacter;
+        if (!character) return [];
 
-        const character = this.currentCharacter;
-        const persona = this.currentPersona;
+        const persona = opts.persona || this.currentPersona;
+        const history = Array.isArray(opts.history) ? opts.history : this.chatHistory;
+        const limit = typeof opts.historyLimit === 'number' ? opts.historyLimit : 20;
+        const groupSystemPrompt = opts.groupSystemPrompt || '';
+        const groupRoster = Array.isArray(opts.groupRoster) ? opts.groupRoster : null;
+        const speakerOverride = opts.speakerOverride || null;
 
         // build system prompt
-        let systemPrompt = character.systemPrompt || '';
+        let systemPrompt = (speakerOverride && speakerOverride.systemPromptOverride)
+            ? speakerOverride.systemPromptOverride
+            : (character.systemPrompt || '');
+
+        if (groupSystemPrompt) {
+            systemPrompt = groupSystemPrompt + '\n\n' + systemPrompt;
+        }
+
+        if (groupRoster && groupRoster.length > 1) {
+            const others = groupRoster
+                .filter(c => c.id !== character.id)
+                .map(c => `- ${c.name}${c.description ? ': ' + c.description.split('\n')[0] : ''}`)
+                .join('\n');
+            systemPrompt += `\n\n[group roleplay]\nyou are ${character.name}. only respond as ${character.name}.\nother participants:\n${others}`;
+        }
 
         if (character.description) {
             systemPrompt += `\n\n[character description]\n${character.description}`;
@@ -1140,13 +1658,31 @@ class RPModule {
             systemPrompt += `\n\n[example dialogue]\n${character.mesExample}`;
         }
 
-        // add lorebook entries
-        if (character.lorebookId) {
-            const recentText = this.chatHistory.slice(-5).map(m => m.content).join(' ');
-            const loreEntries = this.storage.getMatchingLoreEntries(character.lorebookId, recentText);
-            if (loreEntries.length > 0) {
-                systemPrompt += '\n\n[world info]\n' + loreEntries.map(e => e.content).join('\n');
+        // collect lorebook entries from multiple sources:
+        // 1) per-character embedded lorebook
+        // 2) shared lorebook referenced by character.lorebookId
+        const lorebookEntries = [];
+        if (Array.isArray(character.embeddedLorebook) && character.embeddedLorebook.length > 0) {
+            for (const e of character.embeddedLorebook) {
+                lorebookEntries.push(e instanceof LorebookEntry ? e : new LorebookEntry(e));
             }
+        }
+        if (character.lorebookId) {
+            const shared = this.storage.getLorebook(character.lorebookId) || [];
+            for (const e of shared) {
+                lorebookEntries.push(e instanceof LorebookEntry ? e : new LorebookEntry(e));
+            }
+        }
+
+        let authorsNote = '';
+        if (lorebookEntries.length > 0) {
+            const recentMsgs = history.slice(-Math.max(5, opts.loreScanWindow || 8))
+                .map(m => ({ role: m.role, content: (m.getActiveContent ? m.getActiveContent() : m.content) || '' }));
+            const result = LorebookActivationEngine.activate(lorebookEntries, recentMsgs, { tokenBudget: 1500 });
+            if (result.before) systemPrompt = result.before + '\n\n' + systemPrompt;
+            if (result.after) systemPrompt += '\n\n[world info]\n' + result.after;
+            if (result.system) systemPrompt += '\n\n' + result.system;
+            if (result.an) authorsNote = result.an;
         }
 
         if (character.postHistoryInstructions) {
@@ -1157,26 +1693,36 @@ class RPModule {
             { role: 'system', content: systemPrompt.trim() }
         ];
 
-        // add chat history (last 20 messages for context window)
-        const recentMessages = this.chatHistory.slice(-20);
-        for (const msg of recentMessages) {
-            const role = msg.role === 'assistant' ? 'assistant' : 'user';
+        // include chat history within limit
+        const recent = limit > 0 ? history.slice(-limit) : history.slice();
+        for (const msg of recent) {
+            const role = msg.role === 'assistant' ? 'assistant' : (msg.role === 'system' ? 'system' : 'user');
+            const content = typeof msg.getActiveContent === 'function' ? msg.getActiveContent() : msg.content;
 
-            // handle multimodal messages
-            if (msg.images && msg.images.length > 0) {
-                const content = [
-                    { type: 'text', text: msg.content }
-                ];
-                for (const img of msg.images) {
-                    content.push({
-                        type: 'image_url',
-                        image_url: { url: img }
-                    });
+            // for group chats, prefix assistant messages with the speaker's name
+            // so models can keep track of who said what
+            let prefixedContent = content;
+            if (groupRoster && groupRoster.length > 1 && role === 'assistant' && msg.speakerCharacterId) {
+                const speaker = groupRoster.find(c => c.id === msg.speakerCharacterId);
+                if (speaker && !content.startsWith(speaker.name + ':')) {
+                    prefixedContent = `${speaker.name}: ${content}`;
                 }
-                messages.push({ role, content });
-            } else {
-                messages.push({ role, content: msg.content });
             }
+
+            if (msg.images && msg.images.length > 0) {
+                const c = [{ type: 'text', text: prefixedContent }];
+                for (const img of msg.images) {
+                    c.push({ type: 'image_url', image_url: { url: img } });
+                }
+                messages.push({ role, content: c });
+            } else {
+                messages.push({ role, content: prefixedContent });
+            }
+        }
+
+        // author's note goes after the recent messages as a system nudge
+        if (authorsNote) {
+            messages.push({ role: 'system', content: '[author\'s note]\n' + authorsNote });
         }
 
         return messages;
@@ -1192,11 +1738,17 @@ class RPModule {
             throw new Error('nvidia nim api key not configured. go to rp settings to add your key.');
         }
 
+        // allow extensions to mutate the outgoing user message
+        let payload = { text, images };
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            payload = window.rpExtensions.emit('chat:beforeSend', payload) || payload;
+        }
+
         // create user message
         const userMessage = new ChatMessage({
             role: 'user',
-            content: text,
-            images: images,
+            content: payload.text,
+            images: payload.images || [],
             characterId: this.currentCharacter.id,
             personaId: this.currentPersona?.id
         });
@@ -1219,17 +1771,361 @@ class RPModule {
     saveAssistantMessage(content) {
         if (!this.currentCharacter) return null;
 
+        // detect expression from content for the active character
+        let expression = null;
+        try {
+            expression = ExpressionDetector.detect(this.currentCharacter, content);
+        } catch (e) {
+            // non-fatal
+        }
+
         const assistantMessage = new ChatMessage({
             role: 'assistant',
             content: content,
             characterId: this.currentCharacter.id,
-            personaId: this.currentPersona?.id
+            personaId: this.currentPersona?.id,
+            expression
         });
+
+        // allow extensions to react/mutate
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            const mutated = window.rpExtensions.emit('chat:afterReceive', { message: assistantMessage });
+            if (mutated && mutated.message) {
+                Object.assign(assistantMessage, mutated.message);
+            }
+        }
 
         this.chatHistory.push(assistantMessage);
         this.storage.addMessage(this.currentCharacter.id, assistantMessage);
 
         return assistantMessage;
+    }
+
+    // ---- swipes (alternate variants) ----
+    // generate a new variant for the assistant message at messageIndex.
+    // returns a stream + the target message reference. caller is responsible
+    // for collecting the streamed text and calling commitSwipe with the result.
+    async generateSwipe(messageIndex) {
+        if (!this.currentCharacter) throw new Error('no character selected');
+        const msg = this.chatHistory[messageIndex];
+        if (!msg || msg.role !== 'assistant') {
+            throw new Error('can only swipe assistant messages');
+        }
+
+        // build context from history up to (but not including) the target message
+        const historyBefore = this.chatHistory.slice(0, messageIndex);
+        const contextMessages = this.getContextMessages({ history: historyBefore });
+
+        const temperature = this.storage.getSetting('temperature', 0.8);
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
+
+        return {
+            message: msg,
+            messageIndex,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens }),
+            temperature
+        };
+    }
+
+    // store the new variant on the message and make it active
+    commitSwipe(messageIndex, content, meta = {}) {
+        const msg = this.chatHistory[messageIndex];
+        if (!msg) return null;
+        msg.variants.push({
+            content,
+            generatedAt: new Date().toISOString(),
+            model: NVIDIA_NIM_CONFIG.model,
+            temperature: meta.temperature
+        });
+        msg.activeVariantIndex = msg.variants.length - 1;
+        // re-detect expression for the active variant
+        try {
+            msg.expression = ExpressionDetector.detect(this.currentCharacter, content) || msg.expression;
+        } catch (e) {}
+        this.persistCurrentChat();
+        return msg;
+    }
+
+    setActiveVariant(messageIndex, variantIndex) {
+        const msg = this.chatHistory[messageIndex];
+        if (!msg) return null;
+        if (variantIndex < -1 || variantIndex >= msg.variants.length) return null;
+        msg.activeVariantIndex = variantIndex;
+        const active = msg.getActiveContent();
+        try {
+            msg.expression = ExpressionDetector.detect(this.currentCharacter, active) || msg.expression;
+        } catch (e) {}
+        this.persistCurrentChat();
+        return msg;
+    }
+
+    // ---- continue generation ----
+    // continues the assistant message at messageIndex by appending more text.
+    async generateContinuation(messageIndex) {
+        if (!this.currentCharacter) throw new Error('no character selected');
+        const msg = this.chatHistory[messageIndex];
+        if (!msg || msg.role !== 'assistant') {
+            throw new Error('can only continue assistant messages');
+        }
+
+        // include the partial assistant message at the end so the model continues from there
+        const historyUpToAndIncluding = this.chatHistory.slice(0, messageIndex + 1);
+        const contextMessages = this.getContextMessages({ history: historyUpToAndIncluding });
+
+        // append a brief nudge instructing the model to continue without a preamble
+        contextMessages.push({
+            role: 'system',
+            content: 'continue the previous message naturally without restating it. do not add a preamble or quote it; just continue from where it ended.'
+        });
+
+        const temperature = Math.min(0.8, this.storage.getSetting('temperature', 0.8));
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
+        return {
+            message: msg,
+            messageIndex,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens })
+        };
+    }
+
+    commitContinuation(messageIndex, additionalContent) {
+        const msg = this.chatHistory[messageIndex];
+        if (!msg) return null;
+        // separate with a space if the existing content doesn't end with whitespace
+        const joiner = /\s$/.test(msg.getActiveContent()) ? '' : ' ';
+        if (msg.activeVariantIndex >= 0 && msg.variants[msg.activeVariantIndex]) {
+            msg.variants[msg.activeVariantIndex].content += joiner + additionalContent;
+        } else {
+            msg.content += joiner + additionalContent;
+        }
+        msg.isEdited = true;
+        this.persistCurrentChat();
+        return msg;
+    }
+
+    // ---- summarization ----
+    // generates a summary text for the given messages.
+    async summarizeMessages(messages) {
+        const keys = this.getApiKeys();
+        if (!keys.nvidia) {
+            throw new Error('nvidia nim api key not configured.');
+        }
+
+        const charName = this.currentCharacter?.name || 'character';
+        const personaName = this.currentPersona?.name || 'user';
+
+        const historyText = messages
+            .map(m => {
+                const speaker = m.role === 'assistant' ? charName : personaName;
+                const text = typeof m.getActiveContent === 'function' ? m.getActiveContent() : m.content;
+                return `${speaker}: ${text}`;
+            })
+            .join('\n');
+
+        const prompt = [
+            { role: 'system', content: 'you are a helpful assistant that summarizes roleplay conversations.' },
+            { role: 'user', content:
+                `below is the chat history between ${personaName} and ${charName}.\n` +
+                'produce a concise summary (max 200 tokens) that captures the key events, emotional state, relationships, and any unresolved plot points.\n' +
+                'write in third person present tense.\n\n' +
+                'chat history:\n' + historyText + '\n\nsummary:' }
+        ];
+
+        // non-streaming for summary
+        const result = await this.apiClient.sendMessage(prompt, {
+            temperature: 0.5,
+            maxTokens: 400,
+            stream: false
+        });
+        return (result || '').toString().trim();
+    }
+
+    // replace the first n messages with a single system "recap" message
+    applySummaryReplace(summaryText, replaceCount) {
+        if (!this.currentCharacter) return;
+        const recap = new ChatMessage({
+            role: 'system',
+            content: '[recap]\n' + summaryText,
+            characterId: this.currentCharacter.id,
+            isSummary: true
+        });
+        this.chatHistory.splice(0, Math.max(1, replaceCount), recap);
+        this.persistCurrentChat();
+    }
+
+    // append summary as its own system message without removing history
+    applySummaryAppend(summaryText) {
+        if (!this.currentCharacter) return;
+        const recap = new ChatMessage({
+            role: 'system',
+            content: '[recap]\n' + summaryText,
+            characterId: this.currentCharacter.id,
+            isSummary: true
+        });
+        this.chatHistory.push(recap);
+        this.storage.addMessage(this.currentCharacter.id, recap);
+    }
+
+    // rough token estimate (chars/4) for the active chat
+    estimateChatTokens() {
+        let chars = 0;
+        for (const m of this.chatHistory) {
+            chars += (typeof m.getActiveContent === 'function' ? m.getActiveContent() : (m.content || '')).length;
+        }
+        return Math.ceil(chars / 4);
+    }
+
+    // persist the active chat after any in-place mutation
+    persistCurrentChat() {
+        if (!this.currentCharacter) return;
+        this.storage.saveChat(this.currentCharacter.id, {
+            messages: this.chatHistory,
+            branches: ['main']
+        });
+    }
+
+    // ---- group chats ----
+    createGroup(data) {
+        const group = new Group(data);
+        return this.storage.saveGroup(group);
+    }
+
+    updateGroup(id, patch) {
+        const group = this.storage.getGroup(id);
+        if (!group) return null;
+        Object.assign(group, patch);
+        return this.storage.saveGroup(group);
+    }
+
+    deleteGroup(id) {
+        this.storage.deleteGroup(id);
+        if (this.currentGroup?.id === id) {
+            this.currentGroup = null;
+            this.groupChatHistory = [];
+        }
+    }
+
+    selectGroup(groupId) {
+        const group = this.storage.getGroup(groupId);
+        if (!group) return null;
+        this.currentGroup = group;
+        this.currentCharacter = null; // mutually exclusive view
+        this.currentPersona = this.storage.getActivePersona();
+        const chat = this.storage.getGroupChat(groupId);
+        this.groupChatHistory = (chat.messages || []).map(m => new ChatMessage(m));
+        return group;
+    }
+
+    persistCurrentGroupChat() {
+        if (!this.currentGroup) return;
+        this.storage.saveGroupChat(this.currentGroup.id, {
+            messages: this.groupChatHistory
+        });
+    }
+
+    // returns the list of characters in the group (resolved + ordered)
+    getGroupRoster(group = this.currentGroup) {
+        if (!group) return [];
+        const roster = [];
+        for (const id of group.characterIds) {
+            const c = this.storage.getCharacter(id);
+            if (c) roster.push(c);
+        }
+        return roster;
+    }
+
+    // determines the next speaker(s) for a group turn.
+    decideGroupSpeakers(group, lastSpeakerId = null) {
+        const roster = this.getGroupRoster(group);
+        if (roster.length === 0) return [];
+        const order = group.settings?.turnOrder || 'sequential';
+        if (order === 'random') {
+            const idx = Math.floor(Math.random() * roster.length);
+            return [roster[idx]];
+        }
+        if (order === 'roundRobin' && lastSpeakerId) {
+            const lastIdx = roster.findIndex(c => c.id === lastSpeakerId);
+            const next = roster[(lastIdx + 1) % roster.length];
+            return [next];
+        }
+        // sequential: return all in order (auto-advance mode will iterate)
+        return roster;
+    }
+
+    // sends a user message into a group and returns one stream per character.
+    // caller drives the streams sequentially and calls commitGroupAssistantMessage for each.
+    async sendGroupMessage(text, images = []) {
+        if (!this.currentGroup) throw new Error('no group selected');
+        const keys = this.getApiKeys();
+        if (!keys.nvidia) {
+            throw new Error('nvidia nim api key not configured. go to rp settings to add your key.');
+        }
+
+        let payload = { text, images };
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            payload = window.rpExtensions.emit('chat:beforeSend', payload) || payload;
+        }
+
+        const userMessage = new ChatMessage({
+            role: 'user',
+            content: payload.text,
+            images: payload.images || [],
+            personaId: this.currentPersona?.id
+        });
+        this.groupChatHistory.push(userMessage);
+        this.persistCurrentGroupChat();
+        return { userMessage };
+    }
+
+    // generates one assistant response for the given speaker character within the group.
+    async generateGroupTurn(character) {
+        if (!this.currentGroup || !character) throw new Error('invalid group turn');
+        const roster = this.getGroupRoster(this.currentGroup);
+        const speakerOverride = this.currentGroup.characterOverrides?.[character.id] || null;
+        const groupSystemPrompt = this.currentGroup.settings?.systemPromptTemplate || '';
+
+        const contextMessages = this.getContextMessages({
+            character,
+            persona: this.currentPersona,
+            history: this.groupChatHistory,
+            groupSystemPrompt,
+            groupRoster: roster,
+            speakerOverride
+        });
+
+        const temperature = speakerOverride?.temperature ?? this.storage.getSetting('temperature', 0.8);
+        const maxTokens = this.storage.getSetting('maxTokens', 2048);
+        return {
+            character,
+            stream: this.apiClient.streamMessage(contextMessages, { temperature, maxTokens })
+        };
+    }
+
+    commitGroupAssistantMessage(character, content) {
+        let expression = null;
+        try { expression = ExpressionDetector.detect(character, content); } catch (e) {}
+
+        const msg = new ChatMessage({
+            role: 'assistant',
+            content,
+            characterId: character.id,
+            speakerCharacterId: character.id,
+            personaId: this.currentPersona?.id,
+            expression
+        });
+
+        if (window.rpExtensions && typeof window.rpExtensions.emit === 'function') {
+            window.rpExtensions.emit('chat:afterReceive', { message: msg });
+        }
+
+        this.groupChatHistory.push(msg);
+        this.persistCurrentGroupChat();
+        return msg;
+    }
+
+    clearGroupChat() {
+        if (!this.currentGroup) return;
+        this.groupChatHistory = [];
+        this.storage.clearGroupChat(this.currentGroup.id);
     }
 
     clearChat() {
@@ -1381,7 +2277,7 @@ class RPModule {
         return JSON.stringify(v3Data, null, 2);
     }
 
-    // quick replies
+    // legacy: flat quick replies stored as a setting. retained for backward compatibility.
     getQuickReplies() {
         return this.storage.getSetting('quickReplies', [
             { id: 'continue', label: 'continue...', text: 'please continue.' },
@@ -1392,6 +2288,217 @@ class RPModule {
 
     saveQuickReplies(replies) {
         this.storage.setSetting('quickReplies', replies);
+    }
+
+    // returns the merged set of quick replies for the current chat scope.
+    // includes global sets, plus any character/group-scoped sets, plus legacy.
+    getActiveQuickReplies() {
+        const out = [];
+        // legacy first (these are global)
+        for (const r of this.getQuickReplies()) {
+            out.push({ id: r.id || ('legacy_' + Math.random().toString(36).slice(2, 7)), label: r.label, text: r.text, sendImmediately: false });
+        }
+        let scope = 'global';
+        let scopeId = null;
+        if (this.currentGroup) { scope = 'group'; scopeId = this.currentGroup.id; }
+        else if (this.currentCharacter) { scope = 'character'; scopeId = this.currentCharacter.id; }
+        const sets = this.storage.getQuickReplySetsForScope(scope, scopeId);
+        for (const s of sets) {
+            for (const r of s.replies) {
+                out.push({ id: r.id, label: r.label, text: r.text, sendImmediately: !!r.sendImmediately, setName: s.name });
+            }
+        }
+        return out;
+    }
+}
+
+// =====================================================
+// extensions / plugin system
+// =====================================================
+// extensions are simple javascript objects (or factory functions) that subscribe
+// to events and may register slash commands or ui-slot components.
+//
+// minimal manifest shape (in-memory):
+// {
+//   id, name, version,
+//   permissions: ['chat:read', 'chat:send', 'ui:inject'],
+//   install(api): registers handlers using the provided api
+// }
+//
+// the api passed to install():
+//   api.on(event, handler)
+//   api.off(event, handler)
+//   api.registerSlashCommand(name, handler)  // handler(args, ctx) -> string | null
+//   api.registerUIComponent(slot, renderer)  // renderer(container)
+//   api.getSetting(key) / api.setSetting(key, value)
+//   api.notify(message)
+//   api.requestHttp(url, options) // proxied through /api/rp/extensions/proxy (no-op stub)
+class ExtensionManager {
+    constructor(storage) {
+        this.storage = storage;
+        this.extensions = new Map();
+        this.handlers = new Map(); // event -> Set<fn>
+        this.slashCommands = new Map(); // name -> { fn, extensionId }
+        this.uiSlots = new Map(); // slot -> [{ extensionId, render }]
+    }
+
+    register(manifest) {
+        if (!manifest || !manifest.id) {
+            console.warn('[rp] extension missing id');
+            return false;
+        }
+        if (this.extensions.has(manifest.id)) {
+            // already registered - replace
+            this.unregister(manifest.id);
+        }
+        const state = this.storage.getExtensionState(manifest.id);
+        this.extensions.set(manifest.id, { manifest, enabled: !!state.enabled });
+        if (state.enabled) this.activate(manifest.id);
+        return true;
+    }
+
+    unregister(id) {
+        this.deactivate(id);
+        this.extensions.delete(id);
+    }
+
+    activate(id) {
+        const ext = this.extensions.get(id);
+        if (!ext) return false;
+        const api = this.makeApi(id);
+        try {
+            if (typeof ext.manifest.install === 'function') {
+                ext.manifest.install(api);
+            }
+            ext.enabled = true;
+            this.storage.setExtensionState(id, { enabled: true, settings: this.storage.getExtensionState(id).settings || {} });
+        } catch (e) {
+            console.error('[rp] extension activation failed:', id, e);
+            return false;
+        }
+        return true;
+    }
+
+    deactivate(id) {
+        // strip all handlers/commands/slots registered by this extension
+        for (const [event, set] of this.handlers) {
+            for (const h of Array.from(set)) {
+                if (h.__extensionId === id) set.delete(h);
+            }
+        }
+        for (const [name, { extensionId }] of Array.from(this.slashCommands)) {
+            if (extensionId === id) this.slashCommands.delete(name);
+        }
+        for (const [slot, list] of this.uiSlots) {
+            this.uiSlots.set(slot, list.filter(r => r.extensionId !== id));
+        }
+        const ext = this.extensions.get(id);
+        if (ext) ext.enabled = false;
+        this.storage.setExtensionState(id, { enabled: false, settings: this.storage.getExtensionState(id).settings || {} });
+    }
+
+    isEnabled(id) {
+        return !!this.extensions.get(id)?.enabled;
+    }
+
+    listExtensions() {
+        return Array.from(this.extensions.values()).map(({ manifest, enabled }) => ({
+            id: manifest.id,
+            name: manifest.name || manifest.id,
+            version: manifest.version || '0.0.0',
+            description: manifest.description || '',
+            permissions: manifest.permissions || [],
+            enabled
+        }));
+    }
+
+    makeApi(extensionId) {
+        const mgr = this;
+        return {
+            on(event, handler) {
+                if (typeof handler !== 'function') return;
+                handler.__extensionId = extensionId;
+                if (!mgr.handlers.has(event)) mgr.handlers.set(event, new Set());
+                mgr.handlers.get(event).add(handler);
+            },
+            off(event, handler) {
+                if (mgr.handlers.has(event)) mgr.handlers.get(event).delete(handler);
+            },
+            registerSlashCommand(name, handler) {
+                if (!name || typeof handler !== 'function') return;
+                mgr.slashCommands.set(name.toLowerCase().replace(/^\//, ''), { fn: handler, extensionId });
+            },
+            registerUIComponent(slot, renderer) {
+                if (!mgr.uiSlots.has(slot)) mgr.uiSlots.set(slot, []);
+                mgr.uiSlots.get(slot).push({ extensionId, render: renderer });
+            },
+            getSetting(key) {
+                return (mgr.storage.getExtensionState(extensionId).settings || {})[key];
+            },
+            setSetting(key, value) {
+                const state = mgr.storage.getExtensionState(extensionId);
+                const next = Object.assign({}, state.settings || {});
+                next[key] = value;
+                mgr.storage.setExtensionState(extensionId, { settings: next });
+            },
+            notify(message) {
+                if (typeof showToast === 'function') showToast(message);
+            },
+            requestHttp(url, options = {}) {
+                // permission gate
+                const perms = (mgr.extensions.get(extensionId)?.manifest?.permissions) || [];
+                if (!perms.includes('http:request')) {
+                    return Promise.reject(new Error('extension lacks http:request permission'));
+                }
+                return fetch(url, options);
+            }
+        };
+    }
+
+    // emit an event to all listeners.
+    // listeners may mutate and return a new payload (used for chat:beforeSend).
+    emit(event, payload) {
+        const set = this.handlers.get(event);
+        if (!set || set.size === 0) return payload;
+        let result = payload;
+        for (const h of set) {
+            try {
+                const r = h(result);
+                if (r !== undefined) result = r;
+            } catch (e) {
+                console.warn(`[rp] extension handler error in event "${event}":`, e);
+            }
+        }
+        return result;
+    }
+
+    // parses a chat input line; if it looks like a slash command, runs it
+    // and returns the textual output (or '' to consume silently).
+    // returns null if the input isn't a slash command.
+    tryHandleSlashCommand(input, ctx = {}) {
+        if (!input || typeof input !== 'string') return null;
+        const trimmed = input.trim();
+        if (!trimmed.startsWith('/')) return null;
+        const space = trimmed.indexOf(' ');
+        const cmd = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).toLowerCase();
+        const args = space === -1 ? '' : trimmed.slice(space + 1);
+        const entry = this.slashCommands.get(cmd);
+        if (!entry) return null;
+        try {
+            const result = entry.fn(args, ctx);
+            return result == null ? '' : String(result);
+        } catch (e) {
+            console.error('[rp] slash command error:', cmd, e);
+            return `error running /${cmd}: ${e.message}`;
+        }
+    }
+
+    renderSlot(slot, container) {
+        const list = this.uiSlots.get(slot);
+        if (!list || list.length === 0) return;
+        for (const item of list) {
+            try { item.render(container); } catch (e) { console.warn('[rp] slot render failed:', e); }
+        }
     }
 }
 
@@ -2346,16 +3453,26 @@ class RPUIController {
 // =====================================================
 let rpModule = null;
 let rpUI = null;
+let rpExtensions = null;
 
 function initRPModule() {
     if (rpModule) return;
 
     rpModule = new RPModule();
+    rpExtensions = new ExtensionManager(rpModule.storage);
     rpUI = new RPUIController(rpModule);
 
     // expose globally
     window.rpModule = rpModule;
     window.rpUI = rpUI;
+    window.rpExtensions = rpExtensions;
+
+    // auto-register any bundled extensions exposed on window.rpBundledExtensions
+    if (Array.isArray(window.rpBundledExtensions)) {
+        for (const m of window.rpBundledExtensions) {
+            try { rpExtensions.register(m); } catch (e) { console.warn('[rp] bundled extension failed:', e); }
+        }
+    }
 
     console.log('[rp] module initialized');
 }
@@ -2378,8 +3495,16 @@ if (typeof module !== 'undefined' && module.exports) {
         Persona,
         ChatMessage,
         LorebookEntry,
+        LorebookActivationEngine,
         ApiKeyPool,
         RPStorage,
-        NvidiaAPIClient
+        NvidiaAPIClient,
+        Group,
+        QuickReply,
+        QuickReplySet,
+        ExpressionDetector,
+        ExtensionManager,
+        RP_STORAGE_KEYS,
+        RP_MIGRATION_VERSION
     };
 }
