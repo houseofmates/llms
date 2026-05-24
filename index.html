@@ -211,11 +211,14 @@
                         <!-- messages rendered here -->
                     </div>
                     <div class="rp-chat-input-container">
+                        <div id="rp-attachment-tray" class="rp-attachment-tray hidden"></div>
                         <div class="rp-chat-input-wrapper">
                             <textarea id="rp-chat-input" placeholder="type your message..." rows="1"></textarea>
                             <div class="rp-chat-input-actions">
                                 <button id="rp-attach-btn" title="attach image" aria-label="Attach image">📎</button>
-                                <input type="file" id="rp-attach-input" accept="image/*" class="hidden">
+                                <input type="file" id="rp-attach-input" accept="image/*" multiple class="hidden">
+                                <button id="rp-attach-video-btn" title="attach video (experimental)" aria-label="Attach video">🎬</button>
+                                <input type="file" id="rp-attach-video-input" accept="video/*" class="hidden">
                                 <button id="rp-send-btn" title="send" aria-label="Send">➤</button>
                             </div>
                         </div>

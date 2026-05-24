@@ -1428,6 +1428,303 @@
 }
 
 /* =====================================================
+   attachment preview tray
+   ===================================================== */
+.rp-attachment-tray {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+    margin-bottom: 0.5rem;
+    max-height: 140px;
+    overflow-y: auto;
+}
+
+.rp-attachment-thumb {
+    position: relative;
+    width: 64px;
+    height: 64px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #333;
+    background: #111;
+    flex-shrink: 0;
+}
+
+.rp-attachment-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.rp-attachment-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+.rp-attachment-remove:hover {
+    background: #f55;
+}
+
+#rp-attach-video-btn {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    font-size: 1.2rem;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    transition: all 0.2s;
+}
+
+#rp-attach-video-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* =====================================================
+   tab long-press close popup
+   ===================================================== */
+.rp-tab-close-popup,
+.tab-close-popup {
+    position: fixed;
+    z-index: 2000;
+    background: #1a1a1a;
+    border: 1px solid #f5af12;
+    border-radius: 12px;
+    padding: 0.5rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 140px;
+}
+
+.tab-close-popup button {
+    background: transparent;
+    border: none;
+    color: #fff;
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.95rem;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.tab-close-popup button:hover {
+    background: rgba(245, 175, 18, 0.15);
+    color: #f5af12;
+}
+
+.tab-close-popup .tab-close-popup-danger:hover {
+    background: rgba(255, 80, 80, 0.15);
+    color: #f55;
+}
+
+.tab-close-popup-backdrop {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    z-index: 1999;
+}
+
+/* =====================================================
+   memory panel
+   ===================================================== */
+.rp-memory-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 360px;
+    max-width: 90vw;
+    height: 100%;
+    background: #0a0a0a;
+    border-left: 1px solid #222;
+    box-shadow: -10px 0 30px rgba(0, 0, 0, 0.6);
+    z-index: 1500;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+}
+
+.rp-memory-panel.open { transform: translateX(0); }
+
+.rp-memory-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem;
+    border-bottom: 1px solid #222;
+}
+
+.rp-memory-panel-header h3 {
+    color: #f5af12;
+    margin: 0;
+    font-size: 1rem;
+}
+
+.rp-memory-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.rp-memory-item {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 0.6rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.rp-memory-item.locked { border-color: #f5af12; }
+.rp-memory-item.auto-fading { opacity: 0.7; }
+
+.rp-memory-item textarea {
+    background: transparent;
+    border: none;
+    color: #eee;
+    font-family: inherit;
+    font-size: 0.85rem;
+    resize: none;
+    width: 100%;
+    outline: none;
+    line-height: 1.4;
+}
+
+.rp-memory-item-meta {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    font-size: 0.7rem;
+    color: #888;
+}
+
+.rp-memory-item-actions {
+    display: flex;
+    gap: 0.3rem;
+    margin-left: auto;
+}
+
+.rp-memory-source-auto { color: #25a1da; }
+.rp-memory-source-manual { color: #f5af12; }
+
+/* =====================================================
+   macros panel
+   ===================================================== */
+.rp-macro-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: #0d0d0d;
+    border: 1px solid #222;
+    border-radius: 8px;
+    margin-bottom: 0.4rem;
+}
+
+.rp-macro-name {
+    font-family: monospace;
+    color: #f5af12;
+    min-width: 110px;
+}
+
+.rp-macro-value {
+    color: #aaa;
+    font-size: 0.8rem;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rp-macro-toggle {
+    appearance: none;
+    width: 36px;
+    height: 20px;
+    background: #333;
+    border-radius: 10px;
+    position: relative;
+    cursor: pointer;
+    transition: background 0.2s;
+    flex-shrink: 0;
+}
+
+.rp-macro-toggle:checked { background: #f5af12; }
+
+.rp-macro-toggle::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s;
+}
+
+.rp-macro-toggle:checked::after { transform: translateX(16px); }
+
+.rp-macro-preview {
+    background: #050505;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 0.75rem;
+    color: #ccc;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.rp-custom-macro-row {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.4rem;
+}
+
+.rp-custom-macro-row input {
+    flex: 1;
+    background: #111;
+    border: 1px solid #333;
+    color: #fff;
+    border-radius: 6px;
+    padding: 0.35rem 0.6rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+}
+
+/* =====================================================
    utilities
    ===================================================== */
 .hidden {

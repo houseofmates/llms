@@ -2548,6 +2548,9 @@ class RPUIController {
         this.elements.sendBtn = document.getElementById('rp-send-btn');
         this.elements.attachBtn = document.getElementById('rp-attach-btn');
         this.elements.attachInput = document.getElementById('rp-attach-input');
+        this.elements.attachVideoBtn = document.getElementById('rp-attach-video-btn');
+        this.elements.attachVideoInput = document.getElementById('rp-attach-video-input');
+        this.elements.attachmentTray = document.getElementById('rp-attachment-tray');
         this.elements.characterInfo = document.getElementById('rp-character-info');
 
         // header elements
@@ -2577,9 +2580,13 @@ class RPUIController {
             }
         });
 
-        // image attachment
+        // image attachment (multiple selection enabled)
         this.elements.attachBtn?.addEventListener('click', () => this.elements.attachInput?.click());
         this.elements.attachInput?.addEventListener('change', (e) => this.handleImageAttach(e));
+
+        // video attachment (experimental: first-frame extraction)
+        this.elements.attachVideoBtn?.addEventListener('click', () => this.elements.attachVideoInput?.click());
+        this.elements.attachVideoInput?.addEventListener('change', (e) => this.handleVideoAttach(e));
     }
 
     // view management
@@ -3605,8 +3612,9 @@ class RPUIController {
 
         try {
             if (isGroup) {
-                await this.rp.sendGroupMessage(text, this.pendingImages || []);
+                await this.rp.sendGroupMessage(text, this.consumePendingAttachmentUrls());
                 this.pendingImages = [];
+                this.renderAttachmentTray();
                 this.renderChat();
                 // auto-advance: each character takes a turn in order
                 if (this.rp.currentGroup.settings.autoAdvance) {
@@ -3631,8 +3639,9 @@ class RPUIController {
                 return;
             }
 
-            const { stream } = await this.rp.sendMessage(text, this.pendingImages || []);
+            const { stream } = await this.rp.sendMessage(text, this.consumePendingAttachmentUrls());
             this.pendingImages = [];
+            this.renderAttachmentTray();
 
             this.renderChat();
 
@@ -3837,37 +3846,148 @@ class RPUIController {
 
             // set input and send
             this.elements.chatInput.value = lastUserMsg.content;
-            this.pendingImages = lastUserMsg.images || [];
+            this.pendingImages = (lastUserMsg.images || []).map(u => ({ kind: 'image', url: u, name: '' }));
+            this.renderAttachmentTray();
             await this.sendMessage();
         }
     }
 
-    handleImageAttach(e) {
-        const file = e.target.files[0];
-        if (!file) return;
+    // accepts one or many images (multiple input). validates each, converts to data url,
+    // pushes into pendingImages, and refreshes the preview tray.
+    async handleImageAttach(e) {
+        const files = Array.from(e.target.files || []);
+        if (files.length === 0) return;
 
-        // validate image
-        if (!file.type.startsWith('image/')) {
-            showToast?.('please select an image file');
-            return;
+        const maxSize = 1024 * 1024; // 1mb per image (kimi can handle reasonable sizes)
+        this.pendingImages = this.pendingImages || [];
+        let added = 0;
+        let rejected = 0;
+
+        for (const file of files) {
+            if (!file.type.startsWith('image/')) { rejected++; continue; }
+            if (file.size > maxSize) { rejected++; continue; }
+            try {
+                const dataUrl = await this.rp.fileToDataUrl(file);
+                this.pendingImages.push({ kind: 'image', url: dataUrl, name: file.name });
+                added++;
+            } catch (err) {
+                rejected++;
+            }
         }
-
-        // enforce 500KB file size limit to prevent localStorage quota errors
-        const maxSize = 500 * 1024; // 500KB
-        if (file.size > maxSize) {
-            showToast?.('image must be under 500kb to prevent storage errors');
-            return;
-        }
-
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            this.pendingImages = this.pendingImages || [];
-            this.pendingImages.push(e.target.result);
-            showToast?.('image attached');
-        };
-        reader.readAsDataURL(file);
 
         e.target.value = '';
+        if (added > 0) showToast?.(`attached ${added} image${added === 1 ? '' : 's'}`);
+        if (rejected > 0) showToast?.(`${rejected} file${rejected === 1 ? '' : 's'} skipped (too large or wrong type)`);
+        this.renderAttachmentTray();
+    }
+
+    // extracts the first frame of a video as an image and attaches it.
+    // kimi cannot consume video natively, so this is the simplest reasonable bridge.
+    async handleVideoAttach(e) {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        if (!file.type.startsWith('video/')) {
+            showToast?.('please select a video file');
+            return;
+        }
+        // 5mb safety cap on the source video; the extracted frame is far smaller
+        if (file.size > 5 * 1024 * 1024) {
+            showToast?.('video must be under 5mb (we extract a single frame)');
+            return;
+        }
+        try {
+            const frame = await this.extractVideoFrame(file);
+            this.pendingImages = this.pendingImages || [];
+            this.pendingImages.push({ kind: 'video-frame', url: frame, name: file.name + ' (frame)' });
+            showToast?.('attached first frame of video (experimental)');
+            this.renderAttachmentTray();
+        } catch (err) {
+            console.error('[rp] video frame extraction failed:', err);
+            showToast?.('could not extract a frame from that video');
+        }
+    }
+
+    // extracts a single frame (around 1s in) from a video file as a jpeg data url
+    extractVideoFrame(file) {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.muted = true;
+            video.playsInline = true;
+            const cleanup = () => { URL.revokeObjectURL(url); video.removeAttribute('src'); video.load(); };
+            video.onloadedmetadata = () => {
+                // seek to 1 second or the middle, whichever is sooner
+                const target = Math.min(1, Math.max(0, (video.duration || 0) * 0.1));
+                video.currentTime = target;
+            };
+            video.onseeked = () => {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = video.videoWidth || 320;
+                    canvas.height = video.videoHeight || 240;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                    cleanup();
+                    resolve(dataUrl);
+                } catch (e) {
+                    cleanup();
+                    reject(e);
+                }
+            };
+            video.onerror = () => { cleanup(); reject(new Error('video load failed')); };
+            video.src = url;
+        });
+    }
+
+    // renders thumbnails for pending attachments with a remove (×) button each.
+    renderAttachmentTray() {
+        const tray = this.elements.attachmentTray;
+        if (!tray) return;
+        const items = this.pendingImages || [];
+        if (items.length === 0) {
+            tray.innerHTML = '';
+            tray.classList.add('hidden');
+            return;
+        }
+        tray.classList.remove('hidden');
+        tray.innerHTML = '';
+        items.forEach((item, idx) => {
+            // backward-compat: items might be plain data url strings from legacy code paths
+            const url = typeof item === 'string' ? item : item.url;
+            const label = typeof item === 'string' ? '' : (item.name || '');
+            const thumb = document.createElement('div');
+            thumb.className = 'rp-attachment-thumb';
+            thumb.title = label || 'image attachment';
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = label || 'attachment';
+            thumb.appendChild(img);
+            const rm = document.createElement('button');
+            rm.className = 'rp-attachment-remove';
+            rm.type = 'button';
+            rm.setAttribute('aria-label', 'remove attachment');
+            rm.textContent = '×';
+            rm.addEventListener('click', () => {
+                this.pendingImages.splice(idx, 1);
+                this.renderAttachmentTray();
+            });
+            thumb.appendChild(rm);
+            tray.appendChild(thumb);
+        });
+    }
+
+    // normalize the pendingImages array into plain data-url strings, since that is the
+    // shape ChatMessage.images expects and the api client serializes into image_url.
+    consumePendingAttachmentUrls() {
+        const out = [];
+        for (const item of (this.pendingImages || [])) {
+            if (typeof item === 'string') out.push(item);
+            else if (item && item.url) out.push(item.url);
+        }
+        return out;
     }
 
     async handleImport(e) {
