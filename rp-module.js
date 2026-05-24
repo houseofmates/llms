@@ -1724,11 +1724,32 @@ class RPModule {
         }
     }
 
+    // returns the bundled nvidia key string (or '') from window.rpBundledKeys.
+    // this file is built from .env on the user's personal machine (see
+    // scripts/bundle-env-keys.js) and is always present in dist/ - either with
+    // a value, or as an empty stub for public builds.
+    getBundledNvidiaKey() {
+        try {
+            if (typeof window === 'undefined') return '';
+            const k = window.rpBundledKeys && window.rpBundledKeys.nvidia;
+            return (typeof k === 'string' && k.trim()) ? k.trim() : '';
+        } catch (e) {
+            return '';
+        }
+    }
+
     loadApiKeys() {
         try {
-            const keys = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
-            if (keys.nvidia) {
-                this.keyPool.setKeys(keys.nvidia);
+            const stored = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
+            // bundled keys ALWAYS win when present - this is the .env / build-time
+            // pool the maintainer set on their personal machine.
+            const bundled = this.getBundledNvidiaKey();
+            if (bundled) {
+                this.keyPool.setKeys(bundled);
+                return;
+            }
+            if (stored.nvidia) {
+                this.keyPool.setKeys(stored.nvidia);
             }
         } catch (e) {
             console.warn('[rp] failed to load api keys:', e);
@@ -1738,7 +1759,12 @@ class RPModule {
     saveApiKeys(keys) {
         try {
             localStorage.setItem(RP_STORAGE_KEYS.API_KEYS, JSON.stringify(keys));
-            if (keys.nvidia) {
+            // bundled keys still take precedence if present; UI-supplied keys
+            // are stored but only activated when no bundled key exists.
+            const bundled = this.getBundledNvidiaKey();
+            if (bundled) {
+                this.keyPool.setKeys(bundled);
+            } else if (keys.nvidia) {
                 this.keyPool.setKeys(keys.nvidia);
             }
         } catch (e) {
@@ -1748,7 +1774,14 @@ class RPModule {
 
     getApiKeys() {
         try {
-            return JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
+            const stored = JSON.parse(localStorage.getItem(RP_STORAGE_KEYS.API_KEYS) || '{}');
+            // expose the bundled key as the effective nvidia key so chat sends
+            // don't error with "no api key configured" when only .env is set.
+            const bundled = this.getBundledNvidiaKey();
+            if (bundled) {
+                return Object.assign({}, stored, { nvidia: bundled, _bundled: true });
+            }
+            return stored;
         } catch (e) {
             return {};
         }
@@ -5559,12 +5592,24 @@ class RPUIController {
 
                 <div class="rp-settings-section">
                     <h3>nvidia nim api</h3>
+                    ${keys._bundled ? `
+                    <div class="rp-sync-status rp-sync-connected">
+                        <span class="rp-sync-indicator"></span>
+                        <span>using bundled keys from .env (${(keys.nvidia || '').split(',').filter(Boolean).length} key(s) loaded at build time)</span>
+                    </div>
+                    <div class="rp-form-group">
+                        <label>api key(s)</label>
+                        <input type="password" id="rp-nvidia-key" value="" disabled placeholder="locked - rebuild from .env to change">
+                        <small>set NVIDIA_API_KEY_1, NVIDIA_API_KEY_2, ... in your .env, then <code>npm run build</code></small>
+                    </div>
+                    ` : `
                     <div class="rp-form-group">
                         <label>api key(s)</label>
                         <input type="password" id="rp-nvidia-key" value="${keys.nvidia || ''}"
                             placeholder="enter your nvidia nim api key (comma-separated for multiple)">
-                        <small>get your key at integrate.api.nvidia.com</small>
+                        <small>get your key at integrate.api.nvidia.com. tip: drop NVIDIA_API_KEY_1, ... in .env and run <code>npm run build</code> to bake them in.</small>
                     </div>
+                    `}
                 </div>
 
                 <div class="rp-settings-section">
@@ -5655,7 +5700,10 @@ class RPUIController {
         });
 
         document.getElementById('rp-settings-save')?.addEventListener('click', () => {
-            const nvidiaKey = document.getElementById('rp-nvidia-key')?.value.trim();
+            const nvidiaInput = document.getElementById('rp-nvidia-key');
+            // skip nvidia key write when the input is disabled (bundled .env active)
+            // so we don't accidentally overwrite stored ui keys with an empty string
+            const nvidiaKey = nvidiaInput && !nvidiaInput.disabled ? nvidiaInput.value.trim() : null;
             const temperature = parseFloat(document.getElementById('rp-temperature')?.value) || 0.8;
             const maxTokens = parseInt(document.getElementById('rp-max-tokens')?.value) || 2048;
 
@@ -5670,7 +5718,11 @@ class RPUIController {
                 localStorage.setItem('llms_nocobase_key', nocobaseKey);
             }
 
-            this.rp.saveApiKeys({ nvidia: nvidiaKey });
+            // only persist the ui-supplied nvidia key when we actually read one
+            // (input wasn't disabled by the bundled-env path)
+            if (nvidiaKey !== null) {
+                this.rp.saveApiKeys({ nvidia: nvidiaKey });
+            }
             this.rp.storage.setSetting('temperature', temperature);
             this.rp.storage.setSetting('maxTokens', maxTokens);
 

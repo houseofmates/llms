@@ -176,13 +176,42 @@ text-only messages are eligible (images bypass the cache cleanly). cache hits su
 - no logging: queries live only in an in-memory buffer that's cleared by the page lifetime or the clear button
 - failures (missing key, brave rejection, network) fall through to a normal generation — never block the chat
 
+<h2 align="center">personal builds: bake nvidia keys from .env</h2>
+
+if you're building the web/electron/apk locally on your own machine and want the rp module to always use your own nvidia keys without typing them into the ui, drop them into `.env` at the repo root:
+
+```bash
+# .env (gitignored - never leaves your machine)
+NVIDIA_API_KEY_1=nvapi-xxxxxxxxxxxxxxxxxxxxxxxx
+NVIDIA_API_KEY_2=nvapi-yyyyyyyyyyyyyyyyyyyyyyyy
+NVIDIA_API_KEY_3=nvapi-zzzzzzzzzzzzzzzzzzzzzzzz
+```
+
+then run:
+
+```bash
+npm run build       # bundles, runs cap sync, copies to electron/app/
+# or, to regenerate just the keys file without a full build:
+npm run bundle:env
+```
+
+what happens:
+
+1. `scripts/bundle-env-keys.js` parses `.env`, collects every `NVIDIA_API_KEY_*` in numeric order, joins them with commas, and writes `dist/rp-keys.bundled.js`
+2. the build pipeline propagates that file into the android apk (via `npx cap sync`) and into electron (via `cp -rf dist/* electron/app/`)
+3. on every page load the rp module sees `window.rpBundledKeys.nvidia` and seeds its key-rotation pool from it — ignoring whatever was in `localStorage`
+4. the rp settings panel shows a "using bundled keys from .env" badge and disables the manual nvidia input
+5. public/ci builds with no `.env` still work fine — the script writes an empty stub so `<script src="rp-keys.bundled.js">` never 404s and the ui input becomes editable again
+
+a `.env.example` is committed to document the format. the actual `.env` and the generated `rp-keys.bundled.js` are both gitignored.
+
 <h2 align="center">testing</h2>
 
 ```bash
 npm test          # runs jest across rp-module + tab-utils suites
 ```
 
-current coverage: 58 passing unit tests across data models, macros, memory dedup, semantic cache cosine + lookup, brave search heuristic + formatting, lorebook activation, group turn order, extensions api, and tab popup dom shape.
+current coverage: 65 passing unit tests across data models, macros, memory dedup, semantic cache cosine + lookup, brave search heuristic + formatting, lorebook activation, group turn order, extensions api, tab popup dom shape, and the .env → bundled-keys pipeline.
 
 <h1 align="center">license</h1>
 
