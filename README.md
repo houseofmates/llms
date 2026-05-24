@@ -1,6 +1,6 @@
 <h1 align="center">llms</h1>
 
-llms is a unified interface for all the ai chat services you actually want to use. it aggregates chatgpt, claude, gemini, ollama, openrouter, and others into a single customizable dashboard built with vanilla javascript — no framework lock-in, no login wall, no account synchronization across browsers.
+llms is a unified interface for all the ai chat services you actually want to use. it aggregates chatgpt, claude, gemini, ollama, openrouter, and others into a single customizable dashboard built with vanilla javascript — no framework lock-in, no account synchronization across browsers.
 
 it runs as a web page, packages as electron builds for desktop, and builds as an android apk through capacitor. one codebase for all three.
 
