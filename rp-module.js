@@ -2595,8 +2595,10 @@ class RPUIController {
     }
 
     goBack() {
-        if (this.rp.currentCharacter) {
+        if (this.rp.currentCharacter || this.rp.currentGroup) {
             this.rp.currentCharacter = null;
+            this.rp.currentGroup = null;
+            this.rp.groupChatHistory = [];
             this.showView('characterGrid');
             this.renderCharacterGrid();
         } else {
@@ -2623,7 +2625,16 @@ class RPUIController {
             showToast?.('character not found');
             return;
         }
+        this.rp.currentGroup = null;
+        this.rp.groupChatHistory = [];
 
+        this.showView('chatView');
+        this.renderChat();
+    }
+
+    showGroupChat(groupId) {
+        const group = this.rp.selectGroup(groupId);
+        if (!group) { showToast?.('group not found'); return; }
         this.showView('chatView');
         this.renderChat();
     }
@@ -2632,10 +2643,44 @@ class RPUIController {
     renderCharacterGrid() {
         if (!this.elements.characterGrid) return;
 
+        // default to characters tab
+        if (!this.currentTab) this.currentTab = 'characters';
+
+        // render tabs + container
+        this.elements.characterGrid.innerHTML = '';
+        const tabs = document.createElement('div');
+        tabs.className = 'rp-tabs';
+        for (const t of [
+            { id: 'characters', label: 'characters', icon: '🎭' },
+            { id: 'groups', label: 'groups', icon: '👥' },
+            { id: 'extensions', label: 'extensions', icon: '🧩' }
+        ]) {
+            const btn = document.createElement('button');
+            btn.className = 'rp-tab' + (this.currentTab === t.id ? ' rp-tab-active' : '');
+            btn.textContent = `${t.icon} ${t.label}`;
+            btn.addEventListener('click', () => { this.currentTab = t.id; this.renderCharacterGrid(); });
+            tabs.appendChild(btn);
+        }
+        this.elements.characterGrid.appendChild(tabs);
+
+        const body = document.createElement('div');
+        body.className = 'rp-tab-body';
+        this.elements.characterGrid.appendChild(body);
+
+        if (this.currentTab === 'groups') {
+            this.renderGroupsTab(body);
+            return;
+        }
+        if (this.currentTab === 'extensions') {
+            this.renderExtensionsTab(body);
+            return;
+        }
+
+        // --- characters tab ---
         const characters = this.rp.storage.getAllCharacters();
 
         if (characters.length === 0) {
-            this.elements.characterGrid.innerHTML = `
+            body.innerHTML = `
                 <div class="rp-empty-state">
                     <div class="rp-empty-icon">🎭</div>
                     <div class="rp-empty-title">no characters yet</div>
@@ -2723,11 +2768,10 @@ class RPUIController {
             grid.appendChild(card);
         }
 
-        this.elements.characterGrid.innerHTML = '';
-        this.elements.characterGrid.appendChild(grid);
+        body.appendChild(grid);
 
         // bind events
-        this.elements.characterGrid.querySelectorAll('.rp-character-card').forEach(card => {
+        body.querySelectorAll('.rp-character-card').forEach(card => {
             const id = card.dataset.id;
 
             // click to open chat
@@ -2764,85 +2808,701 @@ class RPUIController {
         });
     }
 
+    // ---- groups tab ----
+    renderGroupsTab(body) {
+        const groups = this.rp.storage.getAllGroups();
+        const header = document.createElement('div');
+        header.className = 'rp-tab-header';
+        const title = document.createElement('h3');
+        title.textContent = 'groups';
+        header.appendChild(title);
+        const addBtn = document.createElement('button');
+        addBtn.className = 'rp-btn rp-btn-primary';
+        addBtn.textContent = '+ new group';
+        addBtn.addEventListener('click', () => this.showGroupEditor());
+        header.appendChild(addBtn);
+        body.appendChild(header);
+
+        if (groups.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'rp-empty-state';
+            empty.innerHTML = `
+                <div class="rp-empty-icon">👥</div>
+                <div class="rp-empty-title">no groups yet</div>
+                <div class="rp-empty-desc">create a group to chat with multiple characters at once</div>`;
+            body.appendChild(empty);
+            return;
+        }
+
+        const grid = document.createElement('div');
+        grid.className = 'rp-grid';
+        for (const g of groups) {
+            const card = document.createElement('div');
+            card.className = 'rp-character-card';
+            card.dataset.id = g.id;
+
+            const av = document.createElement('div');
+            av.className = 'rp-character-avatar';
+            if (g.avatarUrl) av.style.backgroundImage = `url('${g.avatarUrl.replace(/'/g, "\\'")}')`;
+            else av.textContent = '👥';
+            card.appendChild(av);
+
+            const name = document.createElement('div');
+            name.className = 'rp-character-name';
+            name.textContent = g.name;
+            card.appendChild(name);
+
+            const sub = document.createElement('div');
+            sub.className = 'rp-character-sub';
+            sub.textContent = `${g.characterIds.length} characters`;
+            card.appendChild(sub);
+
+            const actions = document.createElement('div');
+            actions.className = 'rp-character-actions';
+            const edit = document.createElement('button');
+            edit.className = 'rp-action-btn';
+            edit.textContent = '✏️';
+            edit.title = 'edit';
+            edit.addEventListener('click', (e) => { e.stopPropagation(); this.showGroupEditor(g.id); });
+            actions.appendChild(edit);
+            const del = document.createElement('button');
+            del.className = 'rp-action-btn rp-action-delete';
+            del.textContent = '🗑️';
+            del.title = 'delete';
+            del.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm('delete this group? chat history will also be removed.')) {
+                    this.rp.deleteGroup(g.id);
+                    this.renderCharacterGrid();
+                }
+            });
+            actions.appendChild(del);
+            card.appendChild(actions);
+
+            card.addEventListener('click', (e) => {
+                if (!e.target.closest('.rp-action-btn')) this.showGroupChat(g.id);
+            });
+            grid.appendChild(card);
+        }
+        body.appendChild(grid);
+    }
+
+    // ---- group editor ----
+    showGroupEditor(groupId = null) {
+        const group = groupId ? this.rp.storage.getGroup(groupId) : null;
+        const isNew = !group;
+        this.showView('characterEditor');
+        const editor = this.elements.characterEditor;
+        const allChars = this.rp.storage.getAllCharacters();
+        const selected = new Set(group ? group.characterIds : []);
+        const settings = Object.assign({
+            turnOrder: 'sequential', autoAdvance: true, responseDelayMs: 0, systemPromptTemplate: ''
+        }, group?.settings || {});
+
+        editor.innerHTML = `
+            <div class="rp-editor-header">
+                <button class="rp-back-btn" id="rp-geditor-back">←</button>
+                <h2>${isNew ? 'new group' : 'edit group'}</h2>
+            </div>
+            <div class="rp-editor-content">
+                <div class="rp-form-group">
+                    <label>avatar</label>
+                    <div class="rp-avatar-upload">
+                        <div class="rp-avatar-preview" id="rp-geditor-avatar-preview" style="background-image: url('${(group?.avatarUrl || '').replace(/'/g, "\\'")}')">${!group?.avatarUrl ? '👥' : ''}</div>
+                        <input type="file" accept="image/*" id="rp-geditor-avatar-input" class="hidden">
+                        <button type="button" class="rp-btn" id="rp-geditor-avatar-btn">upload avatar</button>
+                    </div>
+                </div>
+                <div class="rp-form-group">
+                    <label>name *</label>
+                    <input type="text" id="rp-geditor-name" value="${this.escapeHtml(group?.name || '')}" placeholder="group name">
+                </div>
+                <div class="rp-form-group">
+                    <label>description</label>
+                    <textarea id="rp-geditor-desc" rows="3" placeholder="what is this group about?">${this.escapeHtml(group?.description || '')}</textarea>
+                </div>
+                <div class="rp-form-group">
+                    <label>characters (drag to reorder)</label>
+                    <div id="rp-geditor-character-list" class="rp-group-char-list"></div>
+                </div>
+                <div class="rp-form-group">
+                    <label>turn order</label>
+                    <select id="rp-geditor-order">
+                        <option value="sequential" ${settings.turnOrder==='sequential'?'selected':''}>sequential (all characters respond in order)</option>
+                        <option value="roundRobin" ${settings.turnOrder==='roundRobin'?'selected':''}>round robin (one at a time, rotates)</option>
+                        <option value="random" ${settings.turnOrder==='random'?'selected':''}>random</option>
+                    </select>
+                </div>
+                <div class="rp-form-group">
+                    <label><input type="checkbox" id="rp-geditor-auto" ${settings.autoAdvance?'checked':''}> auto-advance (send next character automatically)</label>
+                </div>
+                <div class="rp-form-group">
+                    <label>response delay (ms)</label>
+                    <input type="number" id="rp-geditor-delay" min="0" max="5000" value="${settings.responseDelayMs || 0}">
+                </div>
+                <div class="rp-form-group">
+                    <label>group-level system prompt (optional)</label>
+                    <textarea id="rp-geditor-sysprompt" rows="3" placeholder="prepended to every character's system prompt">${this.escapeHtml(settings.systemPromptTemplate || '')}</textarea>
+                </div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-geditor-cancel">cancel</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-geditor-save">${isNew ? 'create' : 'save'}</button>
+                </div>
+            </div>`;
+
+        // render character picker
+        const listEl = document.getElementById('rp-geditor-character-list');
+        const renderCharList = () => {
+            listEl.innerHTML = '';
+            // selected first, in chosen order
+            const order = group ? group.characterIds.slice() : Array.from(selected);
+            const renderItem = (char, isSelected) => {
+                const row = document.createElement('div');
+                row.className = 'rp-group-char-item' + (isSelected ? ' rp-group-char-selected' : '');
+                row.dataset.id = char.id;
+                row.innerHTML = `
+                    <div class="rp-persona-avatar" style="background-image: url('${(char.avatarUrl||'').replace(/'/g, "\\'")}')">${!char.avatarUrl ? '🎭' : ''}</div>
+                    <div class="rp-persona-info"><div class="rp-persona-name">${this.escapeHtml(char.name)}</div></div>
+                    <button class="rp-action-btn" data-action="${isSelected ? 'remove' : 'add'}">${isSelected ? '−' : '+'}</button>`;
+                row.querySelector('button').addEventListener('click', () => {
+                    if (isSelected) selected.delete(char.id);
+                    else selected.add(char.id);
+                    renderCharList();
+                });
+                return row;
+            };
+            for (const id of order) {
+                const c = this.rp.storage.getCharacter(id);
+                if (c && selected.has(id)) listEl.appendChild(renderItem(c, true));
+            }
+            // any remaining selected
+            for (const id of selected) {
+                if (order.includes(id)) continue;
+                const c = this.rp.storage.getCharacter(id);
+                if (c) listEl.appendChild(renderItem(c, true));
+            }
+            // separator
+            const sep = document.createElement('div');
+            sep.className = 'rp-group-char-sep';
+            sep.textContent = 'available characters';
+            listEl.appendChild(sep);
+            for (const c of allChars) {
+                if (selected.has(c.id)) continue;
+                listEl.appendChild(renderItem(c, false));
+            }
+        };
+        renderCharList();
+
+        let avatarData = group?.avatarUrl || '';
+        document.getElementById('rp-geditor-avatar-btn').addEventListener('click', () => document.getElementById('rp-geditor-avatar-input').click());
+        document.getElementById('rp-geditor-avatar-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            if (file.size > 500 * 1024) { showToast?.('avatar must be under 500kb'); return; }
+            avatarData = await this.rp.fileToDataUrl(file);
+            const prev = document.getElementById('rp-geditor-avatar-preview');
+            prev.style.backgroundImage = `url('${avatarData.replace(/'/g, "\\'")}')`;
+            prev.textContent = '';
+        });
+
+        document.getElementById('rp-geditor-back').addEventListener('click', () => { this.showView('characterGrid'); this.renderCharacterGrid(); });
+        document.getElementById('rp-geditor-cancel').addEventListener('click', () => { this.showView('characterGrid'); this.renderCharacterGrid(); });
+        document.getElementById('rp-geditor-save').addEventListener('click', () => {
+            const name = document.getElementById('rp-geditor-name').value.trim();
+            if (!name) { showToast?.('name is required'); return; }
+            const data = {
+                name,
+                description: document.getElementById('rp-geditor-desc').value,
+                avatarUrl: avatarData,
+                characterIds: (() => {
+                    // preserve original order for kept ids, then append newly added
+                    const orig = group?.characterIds || [];
+                    const kept = orig.filter(id => selected.has(id));
+                    const added = Array.from(selected).filter(id => !kept.includes(id));
+                    return kept.concat(added);
+                })(),
+                settings: {
+                    turnOrder: document.getElementById('rp-geditor-order').value,
+                    autoAdvance: document.getElementById('rp-geditor-auto').checked,
+                    responseDelayMs: parseInt(document.getElementById('rp-geditor-delay').value, 10) || 0,
+                    systemPromptTemplate: document.getElementById('rp-geditor-sysprompt').value
+                }
+            };
+            if (isNew) {
+                this.rp.createGroup(data);
+                showToast?.('group created');
+            } else {
+                this.rp.updateGroup(groupId, data);
+                showToast?.('group saved');
+            }
+            this.currentTab = 'groups';
+            this.showView('characterGrid');
+            this.renderCharacterGrid();
+        });
+    }
+
+    // ---- extensions tab ----
+    renderExtensionsTab(body) {
+        const header = document.createElement('div');
+        header.className = 'rp-tab-header';
+        const title = document.createElement('h3');
+        title.textContent = 'extensions';
+        header.appendChild(title);
+        body.appendChild(header);
+
+        const list = window.rpExtensions ? window.rpExtensions.listExtensions() : [];
+        if (list.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'rp-empty-state';
+            empty.innerHTML = `
+                <div class="rp-empty-icon">🧩</div>
+                <div class="rp-empty-title">no extensions installed</div>
+                <div class="rp-empty-desc">extensions can add slash commands, ui widgets, and chat hooks. drop them on <code>window.rpBundledExtensions</code> before initialization.</div>`;
+            body.appendChild(empty);
+            return;
+        }
+
+        for (const ext of list) {
+            const card = document.createElement('div');
+            card.className = 'rp-extension-card';
+            card.innerHTML = `
+                <div class="rp-extension-meta">
+                    <div class="rp-extension-name">${this.escapeHtml(ext.name)} <span class="rp-extension-version">v${this.escapeHtml(ext.version)}</span></div>
+                    <div class="rp-extension-desc">${this.escapeHtml(ext.description || '')}</div>
+                    <div class="rp-extension-perms">permissions: ${ext.permissions.length ? ext.permissions.map(p => `<code>${this.escapeHtml(p)}</code>`).join(' ') : '<em>none</em>'}</div>
+                </div>
+                <div class="rp-extension-toggle">
+                    <label class="rp-switch">
+                        <input type="checkbox" ${ext.enabled ? 'checked' : ''} data-ext="${this.escapeHtml(ext.id)}">
+                        <span>${ext.enabled ? 'enabled' : 'disabled'}</span>
+                    </label>
+                </div>`;
+            card.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {
+                const id = e.target.dataset.ext;
+                if (e.target.checked) window.rpExtensions.activate(id);
+                else window.rpExtensions.deactivate(id);
+                this.renderCharacterGrid();
+            });
+            body.appendChild(card);
+        }
+    }
+
     renderChat() {
-        if (!this.elements.chatMessages || !this.rp.currentCharacter) return;
+        if (!this.elements.chatMessages) return;
 
+        const isGroup = !!this.rp.currentGroup;
         const character = this.rp.currentCharacter;
+        const group = this.rp.currentGroup;
         const persona = this.rp.currentPersona;
+        const history = isGroup ? this.rp.groupChatHistory : this.rp.chatHistory;
 
-        // update character info
+        if (!isGroup && !character) return;
+
+        // header
         if (this.elements.characterInfo) {
+            const headerAvatar = isGroup ? (group.avatarUrl || '') : (character.avatarUrl || '');
+            const headerName = isGroup ? group.name : character.name;
+            const subline = isGroup
+                ? `group chat · ${this.rp.getGroupRoster(group).length} characters`
+                : `chatting as ${this.escapeHtml(persona?.name || 'you')}`;
+
             this.elements.characterInfo.innerHTML = `
                 <div class="rp-chat-header-info">
-                    <div class="rp-chat-avatar" style="background-image: url('${character.avatarUrl || ''}')">
-                        ${!character.avatarUrl ? '🎭' : ''}
+                    <div class="rp-chat-avatar" style="background-image: url('${headerAvatar}')">
+                        ${!headerAvatar ? (isGroup ? '👥' : '🎭') : ''}
                     </div>
                     <div class="rp-chat-header-text">
-                        <div class="rp-chat-character-name">${this.escapeHtml(character.name)}</div>
-                        <div class="rp-chat-persona-name">chatting as ${this.escapeHtml(persona?.name || 'you')}</div>
+                        <div class="rp-chat-character-name">${this.escapeHtml(headerName)}</div>
+                        <div class="rp-chat-persona-name">${subline}</div>
                     </div>
                 </div>
                 <div class="rp-chat-header-actions">
+                    ${isGroup ? '' : `<button class="rp-action-btn" id="rp-summarize-chat" title="summarize">📝</button>`}
                     <button class="rp-action-btn" id="rp-clear-chat" title="clear chat">🗑️</button>
-                    <button class="rp-action-btn" id="rp-regenerate" title="regenerate">🔄</button>
+                    ${isGroup ? `<button class="rp-action-btn" id="rp-group-next" title="next speaker">⏭️</button>` : `<button class="rp-action-btn" id="rp-regenerate" title="regenerate">🔄</button>`}
                 </div>
             `;
 
-            // bind header actions
             document.getElementById('rp-clear-chat')?.addEventListener('click', () => {
                 if (confirm('clear all messages in this chat?')) {
-                    this.rp.clearChat();
+                    if (isGroup) this.rp.clearGroupChat();
+                    else this.rp.clearChat();
                     this.renderChat();
                     showToast?.('chat cleared');
                 }
             });
-
-            document.getElementById('rp-regenerate')?.addEventListener('click', () => {
-                this.regenerateLastMessage();
-            });
+            document.getElementById('rp-regenerate')?.addEventListener('click', () => this.regenerateLastMessage());
+            document.getElementById('rp-summarize-chat')?.addEventListener('click', () => this.showSummarizeModal());
+            document.getElementById('rp-group-next')?.addEventListener('click', () => this.handleGroupNext());
         }
 
-        // render messages
-        let html = '';
+        // build messages via dom for safe rendering
+        const messagesEl = this.elements.chatMessages;
+        messagesEl.innerHTML = '';
 
-        // show greeting if no messages
-        if (this.rp.chatHistory.length === 0 && character.firstMes) {
-            html += `
-                <div class="rp-message rp-message-assistant rp-message-greeting">
-                    <div class="rp-message-avatar" style="background-image: url('${character.avatarUrl || ''}')">
-                        ${!character.avatarUrl ? '🎭' : ''}
-                    </div>
-                    <div class="rp-message-content">
-                        <div class="rp-message-name">${this.escapeHtml(character.name)}</div>
-                        <div class="rp-message-text">${this.formatMessage(character.firstMes)}</div>
-                    </div>
-                </div>
-            `;
+        // greeting placeholder when chat is empty (single-character only)
+        if (!isGroup && history.length === 0 && character.firstMes) {
+            messagesEl.appendChild(this.buildMessageNode({
+                msg: new ChatMessage({ role: 'assistant', content: character.firstMes }),
+                index: -1,
+                character,
+                persona,
+                isGreeting: true
+            }));
         }
 
-        // render chat history
-        for (const msg of this.rp.chatHistory) {
-            const isUser = msg.role === 'user';
-            const avatar = isUser ? (persona?.avatarUrl || '') : (character.avatarUrl || '');
-            const name = isUser ? (persona?.name || 'you') : character.name;
-            const placeholder = isUser ? '👤' : '🎭';
-
-            html += `
-                <div class="rp-message rp-message-${msg.role}" data-id="${msg.id}">
-                    <div class="rp-message-avatar" style="background-image: url('${avatar}')">
-                        ${!avatar ? placeholder : ''}
-                    </div>
-                    <div class="rp-message-content">
-                        <div class="rp-message-name">${this.escapeHtml(name)}</div>
-                        <div class="rp-message-text">${this.formatMessage(msg.content)}</div>
-                        ${msg.images?.length ? this.renderMessageImages(msg.images) : ''}
-                    </div>
-                </div>
-            `;
+        // for group chats: greeting can be each character's firstMes, or skip
+        if (isGroup && history.length === 0) {
+            const roster = this.rp.getGroupRoster(group);
+            for (const c of roster) {
+                if (!c.firstMes) continue;
+                messagesEl.appendChild(this.buildMessageNode({
+                    msg: new ChatMessage({ role: 'assistant', content: c.firstMes, speakerCharacterId: c.id }),
+                    index: -1,
+                    character: c,
+                    persona,
+                    isGreeting: true
+                }));
+            }
         }
 
-        this.elements.chatMessages.innerHTML = html;
+        history.forEach((msg, i) => {
+            // for group chats, resolve the speaker character
+            let speakerChar = character;
+            if (isGroup && msg.role === 'assistant') {
+                speakerChar = this.rp.storage.getCharacter(msg.speakerCharacterId) || speakerChar;
+            }
+            messagesEl.appendChild(this.buildMessageNode({
+                msg,
+                index: i,
+                character: speakerChar,
+                persona,
+                isGroup
+            }));
+        });
+
+        this.renderQuickReplyBar();
+        // allow extensions to inject into the message area
+        try { window.rpExtensions?.renderSlot('chat:afterMessages', messagesEl); } catch (e) {}
         this.scrollToBottom();
+    }
+
+    // builds a single message dom node with avatar, name, content and actions.
+    buildMessageNode({ msg, index, character, persona, isGreeting = false, isGroup = false }) {
+        const isUser = msg.role === 'user';
+        const isSystem = msg.role === 'system';
+        const wrapper = document.createElement('div');
+        wrapper.className = `rp-message rp-message-${msg.role}`;
+        if (isGreeting) wrapper.classList.add('rp-message-greeting');
+        if (msg.isSummary) wrapper.classList.add('rp-message-summary');
+        if (msg.id) wrapper.dataset.id = msg.id;
+        if (typeof index === 'number') wrapper.dataset.index = String(index);
+
+        // avatar (system messages have no avatar)
+        if (!isSystem) {
+            const avatarUrl = isUser
+                ? (persona?.avatarUrl || '')
+                : ExpressionDetector.getAvatarUrl(character, msg.expression);
+            const avatar = document.createElement('div');
+            avatar.className = 'rp-message-avatar';
+            if (avatarUrl) avatar.style.backgroundImage = `url('${avatarUrl.replace(/'/g, "\\'")}')`;
+            else avatar.textContent = isUser ? '👤' : '🎭';
+            wrapper.appendChild(avatar);
+        }
+
+        const content = document.createElement('div');
+        content.className = 'rp-message-content';
+
+        if (!isSystem) {
+            const nameRow = document.createElement('div');
+            nameRow.className = 'rp-message-name';
+            const name = isUser ? (persona?.name || 'you') : (character?.name || 'character');
+            nameRow.textContent = name;
+            // expression badge for assistant messages
+            if (!isUser && msg.expression) {
+                const badge = document.createElement('span');
+                badge.className = 'rp-expression-badge';
+                badge.textContent = ' · ' + msg.expression;
+                nameRow.appendChild(badge);
+            }
+            content.appendChild(nameRow);
+        }
+
+        const text = document.createElement('div');
+        text.className = 'rp-message-text';
+        const activeContent = typeof msg.getActiveContent === 'function' ? msg.getActiveContent() : msg.content;
+        text.innerHTML = this.formatMessage(activeContent);
+        content.appendChild(text);
+
+        // images
+        if (msg.images?.length) {
+            const imgs = document.createElement('div');
+            imgs.className = 'rp-message-images';
+            for (const src of msg.images) {
+                const im = document.createElement('img');
+                im.className = 'rp-message-image';
+                im.src = src;
+                im.addEventListener('click', () => this.showImageModal(src));
+                imgs.appendChild(im);
+            }
+            content.appendChild(imgs);
+        }
+
+        // action footer (skip for system messages and greeting placeholders)
+        if (!isSystem && !isGreeting && typeof index === 'number' && index >= 0) {
+            const footer = document.createElement('div');
+            footer.className = 'rp-message-actions';
+
+            // swipe / variant controls (assistant only)
+            if (!isUser) {
+                const total = msg.totalVariants ? msg.totalVariants() : 1;
+                const cur = msg.activeVariantNumber ? msg.activeVariantNumber() : 1;
+
+                const prevBtn = document.createElement('button');
+                prevBtn.className = 'rp-msg-btn';
+                prevBtn.title = 'previous variant';
+                prevBtn.textContent = '◀';
+                prevBtn.disabled = total <= 1;
+                prevBtn.addEventListener('click', () => this.cycleVariant(index, -1));
+                footer.appendChild(prevBtn);
+
+                const counter = document.createElement('span');
+                counter.className = 'rp-variant-counter';
+                counter.textContent = `${cur}/${total}`;
+                footer.appendChild(counter);
+
+                const nextBtn = document.createElement('button');
+                nextBtn.className = 'rp-msg-btn';
+                nextBtn.title = 'next variant';
+                nextBtn.textContent = '▶';
+                nextBtn.addEventListener('click', () => this.cycleVariant(index, 1));
+                footer.appendChild(nextBtn);
+
+                const swipeBtn = document.createElement('button');
+                swipeBtn.className = 'rp-msg-btn';
+                swipeBtn.title = 'swipe (new variant)';
+                swipeBtn.textContent = '↻';
+                swipeBtn.addEventListener('click', () => this.handleSwipe(index));
+                footer.appendChild(swipeBtn);
+
+                const contBtn = document.createElement('button');
+                contBtn.className = 'rp-msg-btn';
+                contBtn.title = 'continue this message';
+                contBtn.textContent = '⏩';
+                contBtn.addEventListener('click', () => this.handleContinue(index));
+                footer.appendChild(contBtn);
+
+                // expression manual selector
+                if (character?.expressions?.length > 0) {
+                    const expBtn = document.createElement('button');
+                    expBtn.className = 'rp-msg-btn';
+                    expBtn.title = 'change expression';
+                    expBtn.textContent = '🎭';
+                    expBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.showExpressionMenu(character, msg, wrapper);
+                    });
+                    footer.appendChild(expBtn);
+                }
+            }
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'rp-msg-btn rp-msg-btn-danger';
+            delBtn.title = 'delete message';
+            delBtn.textContent = '🗑️';
+            delBtn.addEventListener('click', () => this.deleteMessage(index));
+            footer.appendChild(delBtn);
+
+            content.appendChild(footer);
+        }
+
+        wrapper.appendChild(content);
+        return wrapper;
+    }
+
+    // ---- swipes ----
+    async cycleVariant(index, direction) {
+        const isGroup = !!this.rp.currentGroup;
+        const history = isGroup ? this.rp.groupChatHistory : this.rp.chatHistory;
+        const msg = history[index];
+        if (!msg) return;
+        const total = msg.totalVariants();
+        const cur = msg.activeVariantNumber();
+        const nextNum = ((cur - 1 + direction + total) % total) + 1;
+        // map 1-indexed display number back to activeVariantIndex (-1 means root)
+        const newIdx = nextNum === 1 ? -1 : nextNum - 2;
+        if (isGroup) {
+            msg.activeVariantIndex = newIdx;
+            this.rp.persistCurrentGroupChat();
+        } else {
+            this.rp.setActiveVariant(index, newIdx);
+        }
+        this.renderChat();
+    }
+
+    async handleSwipe(index) {
+        const isGroup = !!this.rp.currentGroup;
+        try {
+            if (isGroup) {
+                // group: swipe regenerates the speaker's variant
+                const msg = this.rp.groupChatHistory[index];
+                if (!msg || msg.role !== 'assistant') return;
+                const speaker = this.rp.storage.getCharacter(msg.speakerCharacterId);
+                if (!speaker) { showToast?.('speaker not found'); return; }
+                // temporarily strip messages after this one to recompute context
+                const original = this.rp.groupChatHistory.slice();
+                this.rp.groupChatHistory = original.slice(0, index);
+                const { stream } = await this.rp.generateGroupTurn(speaker);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                // restore history and append a variant
+                this.rp.groupChatHistory = original;
+                msg.variants.push({ content: full, generatedAt: new Date().toISOString(), model: NVIDIA_NIM_CONFIG.model });
+                msg.activeVariantIndex = msg.variants.length - 1;
+                try { msg.expression = ExpressionDetector.detect(speaker, full) || msg.expression; } catch (e) {}
+                this.rp.persistCurrentGroupChat();
+            } else {
+                const { stream, temperature } = await this.rp.generateSwipe(index);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                this.rp.commitSwipe(index, full, { temperature });
+            }
+            this.renderChat();
+        } catch (e) {
+            console.error('[rp] swipe error:', e);
+            showToast?.('swipe failed: ' + e.message);
+        }
+    }
+
+    async handleContinue(index) {
+        const isGroup = !!this.rp.currentGroup;
+        try {
+            if (isGroup) {
+                const msg = this.rp.groupChatHistory[index];
+                if (!msg || msg.role !== 'assistant') return;
+                const speaker = this.rp.storage.getCharacter(msg.speakerCharacterId);
+                if (!speaker) return;
+                // build context including the partial assistant message
+                const orig = this.rp.groupChatHistory.slice();
+                this.rp.groupChatHistory = orig.slice(0, index + 1);
+                const { stream } = await this.rp.generateGroupTurn(speaker);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                this.rp.groupChatHistory = orig;
+                const joiner = /\s$/.test(msg.getActiveContent()) ? '' : ' ';
+                if (msg.activeVariantIndex >= 0 && msg.variants[msg.activeVariantIndex]) {
+                    msg.variants[msg.activeVariantIndex].content += joiner + full;
+                } else {
+                    msg.content += joiner + full;
+                }
+                msg.isEdited = true;
+                this.rp.persistCurrentGroupChat();
+            } else {
+                const { stream } = await this.rp.generateContinuation(index);
+                let full = '';
+                for await (const chunk of stream) full += chunk;
+                this.rp.commitContinuation(index, full);
+            }
+            this.renderChat();
+        } catch (e) {
+            console.error('[rp] continue error:', e);
+            showToast?.('continue failed: ' + e.message);
+        }
+    }
+
+    deleteMessage(index) {
+        const isGroup = !!this.rp.currentGroup;
+        if (!confirm('delete this message?')) return;
+        const history = isGroup ? this.rp.groupChatHistory : this.rp.chatHistory;
+        history.splice(index, 1);
+        if (isGroup) this.rp.persistCurrentGroupChat();
+        else this.rp.persistCurrentChat();
+        this.renderChat();
+    }
+
+    showExpressionMenu(character, msg, anchor) {
+        // simple inline menu
+        const existing = document.querySelector('.rp-expression-menu');
+        if (existing) existing.remove();
+        const menu = document.createElement('div');
+        menu.className = 'rp-expression-menu';
+        for (const exp of character.expressions) {
+            const item = document.createElement('button');
+            item.className = 'rp-expression-item';
+            if (exp.avatarUrl) {
+                const img = document.createElement('img');
+                img.src = exp.avatarUrl;
+                item.appendChild(img);
+            }
+            const label = document.createElement('span');
+            label.textContent = exp.name;
+            item.appendChild(label);
+            item.addEventListener('click', () => {
+                msg.expression = exp.name;
+                if (this.rp.currentGroup) this.rp.persistCurrentGroupChat();
+                else this.rp.persistCurrentChat();
+                menu.remove();
+                this.renderChat();
+            });
+            menu.appendChild(item);
+        }
+        anchor.appendChild(menu);
+        setTimeout(() => {
+            const onDoc = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', onDoc); } };
+            document.addEventListener('click', onDoc);
+        }, 0);
+    }
+
+    // ---- group chat helpers ----
+    async handleGroupNext() {
+        if (!this.rp.currentGroup) return;
+        // pick next speaker. for round-robin/random use the chooser,
+        // for sequential pick the next character after the last assistant.
+        const history = this.rp.groupChatHistory;
+        const lastAssistant = [...history].reverse().find(m => m.role === 'assistant');
+        const lastSpeakerId = lastAssistant?.speakerCharacterId || null;
+        let speakers = this.rp.decideGroupSpeakers(this.rp.currentGroup, lastSpeakerId);
+        if (this.rp.currentGroup.settings.turnOrder === 'sequential') {
+            // pick just the next one in line
+            const roster = this.rp.getGroupRoster(this.rp.currentGroup);
+            if (roster.length === 0) return;
+            let idx = 0;
+            if (lastSpeakerId) {
+                const i = roster.findIndex(c => c.id === lastSpeakerId);
+                idx = (i + 1) % roster.length;
+            }
+            speakers = [roster[idx]];
+        } else if (speakers.length > 1) {
+            speakers = [speakers[0]];
+        }
+        for (const speaker of speakers) {
+            await this.streamGroupTurn(speaker);
+        }
+    }
+
+    async streamGroupTurn(speaker) {
+        const { stream } = await this.rp.generateGroupTurn(speaker);
+        // build a streaming bubble
+        const node = document.createElement('div');
+        node.className = 'rp-message rp-message-assistant rp-message-streaming';
+        const avatarUrl = ExpressionDetector.getAvatarUrl(speaker, null);
+        node.innerHTML = `
+            <div class="rp-message-avatar" style="background-image: url('${(avatarUrl || '').replace(/'/g, "\\'")}')">${!avatarUrl ? '🎭' : ''}</div>
+            <div class="rp-message-content">
+                <div class="rp-message-name">${this.escapeHtml(speaker.name)}</div>
+                <div class="rp-message-text"></div>
+            </div>`;
+        this.elements.chatMessages.appendChild(node);
+        const textEl = node.querySelector('.rp-message-text');
+        let full = '';
+        for await (const chunk of stream) {
+            full += chunk;
+            textEl.innerHTML = this.formatMessage(full);
+            this.scrollToBottom();
+        }
+        // strip the streaming class and persist
+        node.classList.remove('rp-message-streaming');
+        this.rp.commitGroupAssistantMessage(speaker, full);
+        this.renderChat();
     }
 
     formatMessage(text) {
@@ -2913,21 +3573,75 @@ class RPUIController {
         const text = input.value.trim();
         if (!text && !this.pendingImages?.length) return;
 
+        // check for slash commands handled by extensions
+        if (text.startsWith('/') && window.rpExtensions) {
+            const out = window.rpExtensions.tryHandleSlashCommand(text, {
+                character: this.rp.currentCharacter,
+                group: this.rp.currentGroup,
+                persona: this.rp.currentPersona
+            });
+            if (out !== null) {
+                input.value = '';
+                if (out) {
+                    // inject as a system message visible to the user only
+                    const isGroup = !!this.rp.currentGroup;
+                    const sys = new ChatMessage({ role: 'system', content: out });
+                    if (isGroup) {
+                        this.rp.groupChatHistory.push(sys);
+                        this.rp.persistCurrentGroupChat();
+                    } else if (this.rp.currentCharacter) {
+                        this.rp.chatHistory.push(sys);
+                        this.rp.persistCurrentChat();
+                    }
+                    this.renderChat();
+                }
+                return;
+            }
+        }
+
         input.value = '';
 
+        const isGroup = !!this.rp.currentGroup;
+
         try {
-            const { userMessage, stream } = await this.rp.sendMessage(text, this.pendingImages || []);
+            if (isGroup) {
+                await this.rp.sendGroupMessage(text, this.pendingImages || []);
+                this.pendingImages = [];
+                this.renderChat();
+                // auto-advance: each character takes a turn in order
+                if (this.rp.currentGroup.settings.autoAdvance) {
+                    const order = this.rp.currentGroup.settings.turnOrder;
+                    const roster = this.rp.getGroupRoster(this.rp.currentGroup);
+                    let speakers;
+                    if (order === 'random') {
+                        const idx = Math.floor(Math.random() * roster.length);
+                        speakers = [roster[idx]];
+                    } else if (order === 'roundRobin') {
+                        speakers = [roster[0]];
+                    } else {
+                        speakers = roster;
+                    }
+                    for (const sp of speakers) {
+                        if (this.rp.currentGroup.settings.responseDelayMs) {
+                            await new Promise(r => setTimeout(r, this.rp.currentGroup.settings.responseDelayMs));
+                        }
+                        await this.streamGroupTurn(sp);
+                    }
+                }
+                return;
+            }
+
+            const { stream } = await this.rp.sendMessage(text, this.pendingImages || []);
             this.pendingImages = [];
 
-            // render user message
             this.renderChat();
 
-            // create assistant message element for streaming
             const assistantMsgDiv = document.createElement('div');
             assistantMsgDiv.className = 'rp-message rp-message-assistant rp-message-streaming';
+            const avatarUrl = ExpressionDetector.getAvatarUrl(this.rp.currentCharacter, null);
             assistantMsgDiv.innerHTML = `
-                <div class="rp-message-avatar" style="background-image: url('${this.rp.currentCharacter.avatarUrl || ''}')">
-                    ${!this.rp.currentCharacter.avatarUrl ? '🎭' : ''}
+                <div class="rp-message-avatar" style="background-image: url('${(avatarUrl || '').replace(/'/g, "\\'")}')">
+                    ${!avatarUrl ? '🎭' : ''}
                 </div>
                 <div class="rp-message-content">
                     <div class="rp-message-name">${this.escapeHtml(this.rp.currentCharacter.name)}</div>
@@ -2940,23 +3654,146 @@ class RPUIController {
             const textDiv = assistantMsgDiv.querySelector('.rp-message-text');
             let fullContent = '';
 
-            // stream response
             for await (const chunk of stream) {
                 fullContent += chunk;
                 textDiv.innerHTML = this.formatMessage(fullContent);
                 this.scrollToBottom();
             }
 
-            // save assistant message
             this.rp.saveAssistantMessage(fullContent);
 
-            // remove streaming class
+            // auto-summarize when context is large
+            this.maybeAutoSummarize();
+
             assistantMsgDiv.classList.remove('rp-message-streaming');
+            this.renderChat();
 
         } catch (error) {
             console.error('[rp] send message error:', error);
             showToast?.('error: ' + error.message);
         }
+    }
+
+    // ---- summarization modal ----
+    async showSummarizeModal() {
+        if (!this.rp.currentCharacter) { showToast?.('select a character first'); return; }
+        const history = this.rp.chatHistory;
+        if (history.length === 0) { showToast?.('nothing to summarize'); return; }
+
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body">
+                <h3>summarize conversation</h3>
+                <p>condense the chat so far into a short recap. you can replace older messages with the recap or keep it as a separate note.</p>
+                <div class="rp-summary-actions">
+                    <button class="rp-btn" id="rp-summary-gen">generate summary</button>
+                </div>
+                <textarea id="rp-summary-text" rows="8" placeholder="summary will appear here..."></textarea>
+                <div class="rp-summary-actions">
+                    <label class="rp-summary-replace-row">
+                        replace first
+                        <input type="number" id="rp-summary-count" min="1" max="${history.length}" value="${Math.min(20, history.length)}" style="width:80px;">
+                        messages
+                    </label>
+                </div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-summary-cancel">cancel</button>
+                    <button class="rp-btn" id="rp-summary-append">keep as recap</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-summary-replace">replace messages</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => modal.remove());
+        document.body.appendChild(modal);
+        document.getElementById('rp-summary-cancel').addEventListener('click', () => modal.remove());
+        document.getElementById('rp-summary-gen').addEventListener('click', async () => {
+            const btn = document.getElementById('rp-summary-gen');
+            btn.disabled = true; btn.textContent = 'generating...';
+            try {
+                const summary = await this.rp.summarizeMessages(history);
+                document.getElementById('rp-summary-text').value = summary;
+            } catch (e) {
+                showToast?.('summarize failed: ' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = 'generate summary';
+            }
+        });
+        document.getElementById('rp-summary-append').addEventListener('click', () => {
+            const txt = document.getElementById('rp-summary-text').value.trim();
+            if (!txt) { showToast?.('generate a summary first'); return; }
+            this.rp.applySummaryAppend(txt);
+            modal.remove();
+            this.renderChat();
+            showToast?.('summary appended');
+        });
+        document.getElementById('rp-summary-replace').addEventListener('click', () => {
+            const txt = document.getElementById('rp-summary-text').value.trim();
+            if (!txt) { showToast?.('generate a summary first'); return; }
+            const count = parseInt(document.getElementById('rp-summary-count').value, 10) || 1;
+            this.rp.applySummaryReplace(txt, count);
+            modal.remove();
+            this.renderChat();
+            showToast?.('summary replaced ' + count + ' messages');
+        });
+    }
+
+    // when chat tokens exceed the configured threshold, prompt to auto-summarize.
+    async maybeAutoSummarize() {
+        const enabled = this.rp.storage.getSetting('autoSummarize', false);
+        if (!enabled) return;
+        const threshold = this.rp.storage.getSetting('autoSummarizeThreshold', 6000);
+        const tokens = this.rp.estimateChatTokens();
+        if (tokens < threshold) return;
+        // pull out the older 60% of messages for summarization
+        const cutoff = Math.floor(this.rp.chatHistory.length * 0.6);
+        if (cutoff < 4) return;
+        const older = this.rp.chatHistory.slice(0, cutoff);
+        try {
+            showToast?.('auto-summarizing older messages...');
+            const summary = await this.rp.summarizeMessages(older);
+            this.rp.applySummaryReplace(summary, cutoff);
+        } catch (e) {
+            console.warn('[rp] auto-summarize failed:', e);
+        }
+    }
+
+    // ---- quick reply bar ----
+    renderQuickReplyBar() {
+        let bar = document.getElementById('rp-quick-replies');
+        if (!bar) {
+            // create the bar above the input container
+            const container = document.querySelector('.rp-chat-input-container');
+            if (!container) return;
+            bar = document.createElement('div');
+            bar.id = 'rp-quick-replies';
+            bar.className = 'rp-quick-replies';
+            container.parentNode.insertBefore(bar, container);
+        }
+        bar.innerHTML = '';
+        const replies = this.rp.getActiveQuickReplies();
+        if (replies.length === 0) { bar.style.display = 'none'; return; }
+        bar.style.display = '';
+        for (const r of replies) {
+            const chip = document.createElement('button');
+            chip.className = 'rp-quick-reply';
+            chip.textContent = r.label || r.text.slice(0, 24);
+            chip.title = r.text;
+            chip.addEventListener('click', () => {
+                const input = this.elements.chatInput;
+                if (!input) return;
+                input.value = r.text;
+                if (r.sendImmediately) this.sendMessage();
+                else input.focus();
+            });
+            bar.appendChild(chip);
+        }
+        // edit button at the end
+        const editBtn = document.createElement('button');
+        editBtn.className = 'rp-quick-reply rp-quick-reply-edit';
+        editBtn.textContent = '+ manage';
+        editBtn.addEventListener('click', () => this.showQuickReplyManager());
+        bar.appendChild(editBtn);
     }
 
     async regenerateLastMessage() {
@@ -3125,6 +3962,18 @@ class RPUIController {
                     <input type="text" id="rp-char-tags" value="${(character?.tags || []).join(', ')}" placeholder="tag1, tag2, tag3">
                 </div>
 
+                <div class="rp-form-group">
+                    <label>expressions <small>(emoji-style mood avatars for this character)</small></label>
+                    <div id="rp-char-expressions"></div>
+                    <button type="button" class="rp-btn" id="rp-char-add-expression">+ add expression</button>
+                </div>
+
+                <div class="rp-form-group">
+                    <label>lorebook entries <small>(world info injected when keywords appear)</small></label>
+                    <div id="rp-char-lorebook"></div>
+                    <button type="button" class="rp-btn" id="rp-char-add-lore">+ add lore entry</button>
+                </div>
+
                 <div class="rp-form-actions">
                     <button class="rp-btn" id="rp-editor-cancel">cancel</button>
                     <button class="rp-btn rp-btn-primary" id="rp-editor-save">
@@ -3133,6 +3982,125 @@ class RPUIController {
                 </div>
             </div>
         `;
+
+        // working copies of expression and lorebook arrays
+        let expressions = (character?.expressions || []).map(e => Object.assign({}, e));
+        let embeddedLorebook = (character?.embeddedLorebook || []).map(e => Object.assign({}, e));
+
+        const renderExpressions = () => {
+            const root = document.getElementById('rp-char-expressions');
+            if (!root) return;
+            root.innerHTML = '';
+            if (expressions.length === 0) {
+                const hint = document.createElement('div');
+                hint.className = 'rp-empty-desc';
+                hint.style.padding = '0.5rem 0';
+                hint.textContent = 'no expressions yet. add one to enable mood-based avatar switching.';
+                root.appendChild(hint);
+            }
+            expressions.forEach((exp, idx) => {
+                const row = document.createElement('div');
+                row.className = 'rp-expression-row';
+                row.innerHTML = `
+                    <div class="rp-persona-avatar" style="background-image: url('${(exp.avatarUrl || '').replace(/'/g, "\\'")}')">${!exp.avatarUrl ? '🎭' : ''}</div>
+                    <input type="text" placeholder="name (e.g. happy)" value="${this.escapeHtml(exp.name || '')}" data-field="name">
+                    <input type="text" placeholder="trigger keywords (comma-separated)" value="${this.escapeHtml((exp.triggers || []).join(', '))}" data-field="triggers">
+                    <input type="file" accept="image/*" class="hidden" data-field="file">
+                    <button type="button" class="rp-btn" data-action="upload">upload</button>
+                    <button type="button" class="rp-action-btn rp-action-delete" data-action="remove">🗑️</button>`;
+                row.querySelector('[data-field="name"]').addEventListener('input', e => { expressions[idx].name = e.target.value; });
+                row.querySelector('[data-field="triggers"]').addEventListener('input', e => {
+                    expressions[idx].triggers = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+                });
+                const fileEl = row.querySelector('[data-field="file"]');
+                row.querySelector('[data-action="upload"]').addEventListener('click', () => fileEl.click());
+                fileEl.addEventListener('change', async (e) => {
+                    const f = e.target.files[0]; if (!f) return;
+                    if (f.size > 500 * 1024) { showToast?.('avatar must be under 500kb'); return; }
+                    expressions[idx].avatarUrl = await this.rp.fileToDataUrl(f);
+                    renderExpressions();
+                });
+                row.querySelector('[data-action="remove"]').addEventListener('click', () => {
+                    expressions.splice(idx, 1); renderExpressions();
+                });
+                root.appendChild(row);
+            });
+        };
+        renderExpressions();
+
+        const renderLoreList = () => {
+            const root = document.getElementById('rp-char-lorebook');
+            if (!root) return;
+            root.innerHTML = '';
+            if (embeddedLorebook.length === 0) {
+                const hint = document.createElement('div');
+                hint.className = 'rp-empty-desc';
+                hint.style.padding = '0.5rem 0';
+                hint.textContent = 'no entries yet. add one to inject world info when keywords appear.';
+                root.appendChild(hint);
+            }
+            embeddedLorebook.forEach((entry, idx) => {
+                const row = document.createElement('div');
+                row.className = 'rp-lore-row';
+                row.innerHTML = `
+                    <div class="rp-lore-row-top">
+                        <input type="text" placeholder="comment / title" value="${this.escapeHtml(entry.comment || '')}" data-field="comment">
+                        <label class="rp-lore-toggle"><input type="checkbox" data-field="enabled" ${entry.enabled !== false ? 'checked' : ''}> enabled</label>
+                        <button type="button" class="rp-action-btn rp-action-delete" data-action="remove">🗑️</button>
+                    </div>
+                    <div class="rp-lore-row-keys">
+                        <input type="text" placeholder="primary keys (comma-separated, /regex/ ok)" value="${this.escapeHtml((entry.keys || []).join(', '))}" data-field="keys">
+                        <input type="text" placeholder="secondary keys" value="${this.escapeHtml((entry.secondaryKeys || []).join(', '))}" data-field="secondaryKeys">
+                    </div>
+                    <textarea rows="3" placeholder="content to inject..." data-field="content">${this.escapeHtml(entry.content || '')}</textarea>
+                    <div class="rp-lore-row-meta">
+                        <label>position
+                            <select data-field="position">
+                                <option value="before" ${entry.position==='before'?'selected':''}>before sysprompt</option>
+                                <option value="after" ${entry.position==='after'?'selected':''}>after sysprompt</option>
+                                <option value="system" ${entry.position==='system'?'selected':''}>system message</option>
+                                <option value="an" ${entry.position==='an'?'selected':''}>author's note</option>
+                            </select>
+                        </label>
+                        <label>order <input type="number" value="${entry.order ?? 0}" data-field="order" style="width:70px;"></label>
+                        <label>priority <input type="number" value="${entry.priority ?? 0}" data-field="priority" style="width:70px;"></label>
+                        <label>prob% <input type="number" min="0" max="100" value="${entry.probability ?? 100}" data-field="probability" style="width:70px;"></label>
+                        <label><input type="checkbox" data-field="constant" ${entry.constant?'checked':''}> constant</label>
+                        <label><input type="checkbox" data-field="selective" ${entry.selective?'checked':''}> selective</label>
+                        <label><input type="checkbox" data-field="caseSensitive" ${entry.caseSensitive?'checked':''}> case-sensitive</label>
+                    </div>`;
+                const bind = (selector, fn) => row.querySelectorAll(selector).forEach(fn);
+                bind('input[data-field], select[data-field], textarea[data-field]', el => {
+                    el.addEventListener('input', e => {
+                        const f = e.target.dataset.field;
+                        let v = e.target.value;
+                        if (e.target.type === 'checkbox') v = e.target.checked;
+                        if (f === 'keys' || f === 'secondaryKeys') v = v.split(',').map(s => s.trim()).filter(Boolean);
+                        if (f === 'order' || f === 'priority' || f === 'probability') v = parseInt(v, 10) || 0;
+                        embeddedLorebook[idx][f] = v;
+                    });
+                    el.addEventListener('change', e => {
+                        if (e.target.type === 'checkbox') {
+                            embeddedLorebook[idx][e.target.dataset.field] = e.target.checked;
+                        }
+                    });
+                });
+                row.querySelector('[data-action="remove"]').addEventListener('click', () => {
+                    embeddedLorebook.splice(idx, 1); renderLoreList();
+                });
+                root.appendChild(row);
+            });
+        };
+        renderLoreList();
+
+        document.getElementById('rp-char-add-expression')?.addEventListener('click', () => {
+            expressions.push({ name: '', avatarUrl: '', triggers: [] });
+            renderExpressions();
+        });
+        document.getElementById('rp-char-add-lore')?.addEventListener('click', () => {
+            embeddedLorebook.push(new LorebookEntry({ keys: [], content: '', enabled: true }));
+            renderLoreList();
+        });
 
         // store avatar for saving
         let avatarUrl = character?.avatarUrl || '';
@@ -3188,7 +4156,12 @@ class RPUIController {
                 mesExample: document.getElementById('rp-char-mes-example')?.value || '',
                 systemPrompt: document.getElementById('rp-char-system-prompt')?.value || '',
                 tags: (document.getElementById('rp-char-tags')?.value || '').split(',').map(t => t.trim()).filter(t => t),
-                avatarUrl
+                avatarUrl,
+                // strip empty rows
+                expressions: expressions.filter(e => e.name && e.name.trim()),
+                embeddedLorebook: embeddedLorebook
+                    .filter(e => (e.keys && e.keys.length > 0) || e.constant)
+                    .map(e => new LorebookEntry(e))
             };
 
             if (isNew) {
@@ -3201,6 +4174,126 @@ class RPUIController {
 
             this.showView('characterGrid');
             this.renderCharacterGrid();
+        });
+    }
+
+    // ---- quick reply manager ----
+    showQuickReplyManager() {
+        const modal = document.createElement('div');
+        modal.className = 'rp-image-modal rp-summary-modal';
+        const sets = this.rp.storage.getAllQuickReplySets();
+        const allChars = this.rp.storage.getAllCharacters();
+        const allGroups = this.rp.storage.getAllGroups();
+
+        modal.innerHTML = `
+            <div class="rp-image-modal-backdrop"></div>
+            <div class="rp-summary-modal-body rp-qr-manager">
+                <h3>quick reply manager</h3>
+                <div id="rp-qr-sets"></div>
+                <div class="rp-form-actions">
+                    <button class="rp-btn" id="rp-qr-new">+ new set</button>
+                    <button class="rp-btn rp-btn-primary" id="rp-qr-close">done</button>
+                </div>
+            </div>`;
+        modal.querySelector('.rp-image-modal-backdrop').addEventListener('click', () => { modal.remove(); this.renderChat(); });
+        document.body.appendChild(modal);
+        document.getElementById('rp-qr-close').addEventListener('click', () => { modal.remove(); this.renderChat(); });
+
+        const root = document.getElementById('rp-qr-sets');
+        const renderAll = () => {
+            root.innerHTML = '';
+            const allSets = this.rp.storage.getAllQuickReplySets();
+            if (allSets.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'rp-empty-desc';
+                empty.style.padding = '0.75rem 0';
+                empty.textContent = 'no quick reply sets yet. create one to add reusable chat snippets.';
+                root.appendChild(empty);
+            }
+            for (const s of allSets) {
+                const card = document.createElement('div');
+                card.className = 'rp-qr-set';
+                let scopeOptions = `<option value="global" ${s.scope==='global'?'selected':''}>global</option>
+                                    <option value="character" ${s.scope==='character'?'selected':''}>character</option>
+                                    <option value="group" ${s.scope==='group'?'selected':''}>group</option>`;
+                card.innerHTML = `
+                    <div class="rp-qr-set-header">
+                        <input type="text" data-field="name" value="${this.escapeHtml(s.name)}" placeholder="set name">
+                        <select data-field="scope">${scopeOptions}</select>
+                        <select data-field="scopeId"></select>
+                        <label><input type="checkbox" data-field="enabled" ${s.enabled?'checked':''}> on</label>
+                        <button type="button" class="rp-action-btn rp-action-delete" data-action="del">🗑️</button>
+                    </div>
+                    <div class="rp-qr-replies"></div>
+                    <button type="button" class="rp-btn" data-action="addReply">+ reply</button>`;
+                const scopeIdEl = card.querySelector('[data-field="scopeId"]');
+                const populateScopeId = () => {
+                    scopeIdEl.innerHTML = '';
+                    const opts = s.scope === 'character' ? allChars : (s.scope === 'group' ? allGroups : []);
+                    if (s.scope === 'global') {
+                        scopeIdEl.innerHTML = '<option value="">(n/a)</option>';
+                        scopeIdEl.disabled = true;
+                    } else {
+                        scopeIdEl.disabled = false;
+                        scopeIdEl.innerHTML = '<option value="">(none)</option>' + opts.map(o => `<option value="${this.escapeHtml(o.id)}" ${s.scopeId===o.id?'selected':''}>${this.escapeHtml(o.name)}</option>`).join('');
+                    }
+                };
+                populateScopeId();
+
+                const repliesEl = card.querySelector('.rp-qr-replies');
+                const renderReplies = () => {
+                    repliesEl.innerHTML = '';
+                    s.replies.forEach((r, ri) => {
+                        const row = document.createElement('div');
+                        row.className = 'rp-qr-reply-row';
+                        row.innerHTML = `
+                            <input type="text" placeholder="label" value="${this.escapeHtml(r.label)}" data-field="label">
+                            <input type="text" placeholder="message text" value="${this.escapeHtml(r.text)}" data-field="text">
+                            <label class="rp-qr-send"><input type="checkbox" data-field="sendImmediately" ${r.sendImmediately?'checked':''}> send</label>
+                            <button type="button" class="rp-action-btn rp-action-delete" data-action="rmReply">🗑️</button>`;
+                        row.querySelector('[data-field="label"]').addEventListener('input', e => { r.label = e.target.value; });
+                        row.querySelector('[data-field="text"]').addEventListener('input', e => { r.text = e.target.value; });
+                        row.querySelector('[data-field="sendImmediately"]').addEventListener('change', e => { r.sendImmediately = e.target.checked; });
+                        row.querySelector('[data-action="rmReply"]').addEventListener('click', () => {
+                            s.replies.splice(ri, 1);
+                            this.rp.storage.saveQuickReplySet(s);
+                            renderReplies();
+                        });
+                        repliesEl.appendChild(row);
+                    });
+                };
+                renderReplies();
+
+                card.querySelector('[data-field="name"]').addEventListener('input', e => { s.name = e.target.value; });
+                card.querySelector('[data-field="scope"]').addEventListener('change', e => {
+                    s.scope = e.target.value;
+                    s.scopeId = null;
+                    populateScopeId();
+                    this.rp.storage.saveQuickReplySet(s);
+                });
+                scopeIdEl.addEventListener('change', e => { s.scopeId = e.target.value || null; });
+                card.querySelector('[data-field="enabled"]').addEventListener('change', e => { s.enabled = e.target.checked; });
+                card.querySelector('[data-action="del"]').addEventListener('click', () => {
+                    if (!confirm('delete this set?')) return;
+                    this.rp.storage.deleteQuickReplySet(s.id);
+                    renderAll();
+                });
+                card.querySelector('[data-action="addReply"]').addEventListener('click', () => {
+                    s.replies.push(new QuickReply({ label: '', text: '' }));
+                    renderReplies();
+                });
+                // save on every blur as well, for robustness
+                card.addEventListener('change', () => this.rp.storage.saveQuickReplySet(s));
+                card.addEventListener('blur', () => this.rp.storage.saveQuickReplySet(s), true);
+                root.appendChild(card);
+            }
+        };
+        renderAll();
+
+        document.getElementById('rp-qr-new').addEventListener('click', () => {
+            const ns = new QuickReplySet({ name: 'new set', scope: 'global', replies: [new QuickReply({ label: 'continue...', text: 'please continue.' })] });
+            this.rp.storage.saveQuickReplySet(ns);
+            renderAll();
         });
     }
 
