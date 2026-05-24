@@ -4,26 +4,6 @@ llms is a unified interface for all the ai chat services you actually want to us
 
 it runs as a web page, packages as electron builds for desktop, and builds as an android apk through capacitor. one codebase for all three.
 
-<h2 align="center">mates license
-
-copyright (c) 2026 house of mates
-
-permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "software"), to fork the existing 
-codebase or utilize the code from it in one's own projects so long as financial profit is 
-not to be gained by said code/software created by the code.
-
-PKM IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE HOUSE OF MATES
-SYSTEM BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF 
-CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-USE OR OTHER DEALINGS IN THE SOFTWARE. PKM WAS INITIALLY, AND ONLY MADE TO BE USED
-BY THE HOUSE OF MATES SYSTEM. OTHER USERS WERE NEVER IN MIND FOR THIS PROJECT, AND YOU
-ARE EXPECTED TO CHANGE SIGNIFICANT PARTS OF THE CODEBASE TO ADAPT TO YOUR OWN PREFERENCES
-AND NEEDS BASED ON THE DIFFERENCES IN HOW YOUR BRAIN WORKS VS. THE HOUSE OF MATES SYSTEM'S.
-es</h2>
-
 - **unified dashboard** — one view for every ai service you use. card grid, reorderable, themable.
 - **webview models** — embedded chromium browser inside the app for gemini, chatgpt, claude, and others. oauth flows just work.
 - **api models** — direct rest integration with ollama, openrouter, hugging face, google gemini api. streaming included.
@@ -38,8 +18,8 @@ es</h2>
 
 <h2 align="center">what it is not for</h2>
 
-- **not a free ai service** — you need to supply your own api keys or run a local model. nothing here gives you access to ai without one.
-- **not a model comparison tool** — there is no side-by-side evaluation grid or benchmark runner. this is a launcher.
+- **not a free ai service** — just an aggregator for existing model-serving sites such as gemini.google.com.
+- **not a model comparison tool** — there is no side-by-side evaluation grid or benchmark runner. this is moreso a launcher with web views.
 - **not a token budget manager** — there is no usage tracking or cost dashboard. that lives in your provider's account panel.
 - **electron desktop depends on electron-builder** — linux appimages and debs generate through electron-builder. if you only want the web and the android build, you do not need electron at all — just npm run build.
 
@@ -130,7 +110,7 @@ insert `{{name}}` placeholders anywhere — system prompts, lorebook content, yo
 
 disabled macros remain as literal text. unknown macros are left untouched so you notice typos.
 
-<h3>memories (🧠)</h3>
+<h3>memories</h3>
 
 - side panel listing auto-extracted + manually added memories, scoped per character / persona / global
 - auto-extract runs the kimi model every 4 assistant turns with a json-extraction prompt; results are lowercased and deduped against existing entries via a jaccard+substring similarity score
