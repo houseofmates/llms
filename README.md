@@ -10,7 +10,7 @@ it runs as a web page, packages as electron builds for desktop, and builds as an
 - **streaming responses** — assistant text appears progressively for supported backends
 - **image attachment** — attach images to api model calls for multimodal models
 - **chat history** — per-model conversation history stored in localstorage
-- **multi-platform** — web, linux appimage / deb via electron, android apk via capacitor, windows exe via electron
+- **multi-platform** — web, linux appimage / deb via electron, android apk via capacitor, windows exe via electron, native android apk
 - **icon customization** — change card icons by right-clicking (desktop) or long-pressing (mobile)
 - **code block rendering** — triple-backtick blocks rendered as collapsible sections
 - **dark amber aesthetic** — near-black background with an amber primary accent. not a generic dark theme.
