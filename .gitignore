@@ -10,3 +10,8 @@ skills-lock.json
 .env.local
 .env.*.local
 rp-keys.bundled.js
+# build artifacts
+releases/
+squashfs-root/
+scripts/.llama-android-prebuilt/
+.idea/
