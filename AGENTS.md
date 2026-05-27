@@ -320,4 +320,4 @@ sudo systemctl restart llms-watch.service
 
 ## License
 
-ISC License (see package.json)
+[Mates License](LICENSE)
